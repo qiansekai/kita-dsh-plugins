@@ -1,0 +1,4 @@
+# kita-workspace-ui bundle patch: one client-only row replacing the official ui-workspace.
+- insert:
+    - id: kita-workspace-ui
+      name: 'kita-workspace-ui'

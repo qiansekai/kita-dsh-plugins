@@ -1,0 +1,14 @@
+{
+  "name": "@dsh-external/dsh-quota-retry",
+  "version": "0.1.0",
+  "description": "余额/额度不足（QUOTA）无界长退避 + 鉴权失败（AUTH）有界短退避的自动重试：匹配的错误码等待后重试，而不是让本轮运行直接停下",
+  "type": "module",
+  "main": "./lib/index.js",
+  "files": [
+    "lib"
+  ],
+  "license": "BSD-3-Clause",
+  "peerDependencies": {
+    "cordis": ">=4.0.0-rc <5"
+  }
+}

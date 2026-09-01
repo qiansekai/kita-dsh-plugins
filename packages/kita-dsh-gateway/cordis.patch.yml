@@ -1,0 +1,8 @@
+# kita-dsh-gateway bundle patch: one host-only plugin row.
+- insert:
+    - id: kita-dsh-gateway
+      name: 'kita-dsh-gateway'
+      config:
+        port: 3081
+        targetPort: 3080
+        codeMinutes: 10
