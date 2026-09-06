@@ -135,11 +135,24 @@ function launchToken() {
   }
 }
 
-/** Attach the alpha launch token to the sign-in entry (GET / without token). */
-function withLaunchToken(url) {
+/** True when the request already carries a dsh browser cookie. */
+function hasDshCookie(req) {
+  const cookies = parseCookies(req.headers.cookie)
+  return Object.keys(cookies).some((k) => k.startsWith('dsh-auth-'))
+}
+
+/**
+ * Attach the alpha launch token to the sign-in entry (GET / without token).
+ * Browsers that already hold a valid dsh cookie must NOT receive the token
+ * again: dsh answers a token-bearing request with a valid cookie by
+ * 303 -> "/" (token-stripping), and the next hop would be re-injected here,
+ * looping forever (ERR_TOO_MANY_REDIRECTS).
+ */
+function withLaunchToken(url, req) {
   try {
     const u = new URL(url, 'http://gateway.invalid')
     if (u.pathname === '/' && !u.searchParams.has('token')) {
+      if (hasDshCookie(req)) return url
       const t = launchToken()
       if (t) {
         u.searchParams.set('token', t)
@@ -162,7 +175,7 @@ function proxyHttp(req, res, targetPort) {
     host: TARGET_HOST,
     port: targetPort,
     method: req.method,
-    path: withLaunchToken(req.url),
+    path: withLaunchToken(req.url, req),
     headers,
   }, (upstream) => {
     res.writeHead(upstream.statusCode ?? 502, upstream.headers)
