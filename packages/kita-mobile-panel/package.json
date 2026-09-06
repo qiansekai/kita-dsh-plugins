@@ -2,6 +2,7 @@
   "name": "kita-mobile-panel",
   "version": "0.1.1",
   "description": "Host bridge for the dsh mobile panel: ConPTY terminal over WebSocket (node-pty, dynamic resize) and read-only file list/read routes for the project explorer.",
+  "private": true,
   "type": "module",
   "main": "lib/index.js",
   "license": "MIT",

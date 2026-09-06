@@ -125,6 +125,31 @@ function acceptsHtml(req) {
   return accept.includes('text/html')
 }
 
+/** alpha launch token captured by the start script; empty when unavailable. */
+function launchToken() {
+  try {
+    const home = process.env.DSH_HOME || join(homedir(), '.dsh')
+    return readFileSync(join(home, 'storages', 'alpha-web-token.txt'), 'utf8').trim()
+  } catch {
+    return ''
+  }
+}
+
+/** Attach the alpha launch token to the sign-in entry (GET / without token). */
+function withLaunchToken(url) {
+  try {
+    const u = new URL(url, 'http://gateway.invalid')
+    if (u.pathname === '/' && !u.searchParams.has('token')) {
+      const t = launchToken()
+      if (t) {
+        u.searchParams.set('token', t)
+        return u.pathname + u.search
+      }
+    }
+  } catch {}
+  return url
+}
+
 function proxyHttp(req, res, targetPort) {
   // Rewrite Host to loopback and strip Origin/Referer/Sec-Fetch-Site: the
   // browser on a LAN origin sends its own Origin, and dsh's loopback fence
@@ -137,7 +162,7 @@ function proxyHttp(req, res, targetPort) {
     host: TARGET_HOST,
     port: targetPort,
     method: req.method,
-    path: req.url,
+    path: withLaunchToken(req.url),
     headers,
   }, (upstream) => {
     res.writeHead(upstream.statusCode ?? 502, upstream.headers)
