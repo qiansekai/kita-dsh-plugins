@@ -13,7 +13,9 @@
 | `WS /mobile-terminal?cwd=<绝对路径>&cols=N&rows=N` | xterm.js 终端桥：node-pty 真 ConPTY 内启动 pwsh，JSON 信封 `{t:'data'|'input'|'resize'|'exit'|'fatal'}`，支持动态 resize |
 | `POST /mobile-git/run {cwd, argv}` | 受限 git 桥：动词白名单 + 安全 flag 白名单 + 输出上限 + 硬超时 |
 
-文件部分**只读**；终端即宿主机 shell（与 danger-full-access 文件策略同信任级）。
+文件写操作（rename/copy/move/reveal）带显式守卫：绝对路径校验、重命名单段校验、
+目标存在即失败、目录禁止拷入自身、跨卷 move 降级 cp+rm；`reveal` 不读写文件，
+只在宿主机弹资源管理器窗口。与终端同信任级（配对设备）。
 插件卸载时关闭所有打开的终端。
 
 ## 依赖
@@ -23,6 +25,6 @@
 
 ## 安全警告
 
-终端路由是宿主机**命令执行面**、文件路由可读宿主机文件。设计前提是
+终端路由是宿主机**命令执行面**、文件路由可读写宿主机文件（写操作带守卫，见上）。设计前提是
 **经由 kita-dsh-gateway 的配对鉴权访问**（手机侧），或本机 loopback 直连（桌面侧）。
 **不要在无鉴权环境下单独暴露这些路由。**
