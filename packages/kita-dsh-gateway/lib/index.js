@@ -428,11 +428,17 @@ function localCandidates(deviceIps) {
  * Register the WebUI panel route on the dsh webserver.
  * @param ctx - the gateway plugin context.
  * @param api - live gateway state readers and mutators.
+ * @returns true when the route was registered here; false when webServer is
+ * not visible yet in this context (the caller then retries through ctx.inject).
  */
 function mountPanelBridge(ctx, api) {
   const webServer = ctx.get('webServer')
-  if (webServer === undefined) return
+  if (webServer === undefined) {
+    console.log('[kita-dsh-gateway] 面板桥：webServer 在当前上下文不可见')
+    return false
+  }
   const connection = ctx.get('connection')
+  if (connection === undefined) console.log('[kita-dsh-gateway] 面板桥：connection 不可见，跳过认证围栏')
 
   const sendJson = (res, status, body) => {
     res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
@@ -746,7 +752,7 @@ export function apply(ctx, config) {
     console.error('[kita-dsh-gateway] listen failed:', error.message)
   })
 
-  mountPanelBridge(ctx, {
+  const panelApi = {
     port,
     codeMinutes,
     getCode: () => currentCode,
@@ -774,7 +780,15 @@ export function apply(ctx, config) {
       attempts.clear()
       console.log('[kita-dsh-gateway] WebUI 面板解锁：熔断与锁定已清除')
     },
-  })
+  }
+  // The webserver bundle may apply after this plugin: retry through a scoped
+  // inject instead of silently shipping a gateway with no panel.
+  if (mountPanelBridge(ctx, panelApi) === false) {
+    console.log('[kita-dsh-gateway] 面板桥：等待 webServer 服务就绪后重试')
+    ctx.inject(['webServer'], (scope) => {
+      mountPanelBridge(scope, panelApi)
+    })
+  }
 
   return () => {
     clearInterval(codeTimer)
