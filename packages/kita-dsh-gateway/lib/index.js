@@ -16,11 +16,22 @@
 import http from 'node:http'
 import net from 'node:net'
 import crypto from 'node:crypto'
-import os from 'node:os'
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import z from '@deepseek-ai/schemastery'
+import {
+  ENTRY_HEADER,
+  ENTRY_LAN,
+  ENTRY_LOCAL,
+  ENTRY_TUNNEL,
+  entryOf,
+  isUsableIp,
+  localCandidates,
+  pairUrl,
+} from './pair-util.js'
+import { qrSvg } from './qr.js'
+import { createTunnel, resolveCloudflared } from './tunnel.js'
 
 export const name = 'kita-dsh-gateway'
 
@@ -28,6 +39,16 @@ export const Config = z.object({
   port: z.natural().max(65535).default(3081),
   targetPort: z.natural().max(65535).default(3080),
   codeMinutes: z.natural().min(1).default(10),
+  /**
+   * Path to cloudflared for the one-click Quick Tunnel. Empty falls back to
+   * `CLOUDFLARED_PATH` and then to `PATH`, so no machine-specific location is
+   * baked into the plugin.
+   */
+  cloudflaredPath: z.string().default(''),
+  /** Automatic restarts after the tunnel process dies unexpectedly. */
+  tunnelRestartLimit: z.natural().max(50).default(5),
+  /** How long a `tunnel-start` request waits for the public URL. */
+  tunnelStartTimeoutMs: z.natural().max(120000).default(25000),
 })
 
 const COOKIE_NAME = 'kita_gw'
@@ -164,6 +185,12 @@ function withLaunchToken(url, req) {
   return url
 }
 
+/** True when the socket peer is this machine (the browser or cloudflared). */
+function isLoopbackPeer(req) {
+  const addr = req.socket?.remoteAddress ?? ''
+  return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1'
+}
+
 function proxyHttp(req, res, targetPort) {
   // Rewrite Host to loopback and strip Origin/Referer/Sec-Fetch-Site: the
   // browser on a LAN origin sends its own Origin, and dsh's loopback fence
@@ -172,6 +199,17 @@ function proxyHttp(req, res, targetPort) {
   delete headers.origin
   delete headers.referer
   delete headers['sec-fetch-site']
+  // Stamp which door this request came through, and never accept the client's
+  // own answer: the mark is stripped here and rebuilt from what this process
+  // can observe. `cf-connecting-ip` survives only when cloudflared dialled us
+  // over loopback — a LAN client must not be able to name its own address, or
+  // it could park its failed pairing attempts in someone else's rate-limit
+  // bucket (and the panel would see a forged tunnel origin).
+  const viaTunnel = isLoopbackPeer(req) && typeof req.headers['cf-connecting-ip'] === 'string'
+  delete headers[ENTRY_HEADER]
+  delete headers['cf-connecting-ip']
+  headers[ENTRY_HEADER] = viaTunnel ? ENTRY_TUNNEL : ENTRY_LAN
+  if (viaTunnel) headers['cf-connecting-ip'] = req.headers['cf-connecting-ip']
   const target = http.request({
     host: TARGET_HOST,
     port: targetPort,
@@ -210,7 +248,20 @@ function proxyWs(req, socket, head, targetPort) {
   upstream.on('close', () => socket.destroy())
 }
 
-const PAIR_PAGE = `<!doctype html>
+/**
+ * The pairing page served on the gateway port.
+ *
+ * `local === true` when the page is open on this machine itself — then, and
+ * only then, it renders the QR that carries the code plus a poller that keeps
+ * that QR in step with the rotation. A phone (or anyone else on the LAN, or
+ * through the tunnel) gets the plain six-digit form: rendering the code into a
+ * page any LAN neighbour can load would hand out the pairing code itself, and
+ * that code is the entire authentication.
+ *
+ * A scanned link carries the code in the fragment and the page submits it on
+ * its own, so scanning means being paired — no typing.
+ */
+const pairPage = (local) => `<!doctype html>
 <html lang="zh">
 <head>
 <meta charset="utf-8">
@@ -220,8 +271,9 @@ const PAIR_PAGE = `<!doctype html>
   html,body{height:100%;margin:0}
   body{display:flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif;
        background:#0f1115;color:#e8eaed}
+  .stack{display:flex;flex-direction:column;gap:16px;width:min(320px,84vw)}
   .card{background:#1a1d24;border:1px solid #2a2e38;border-radius:16px;padding:28px 24px;
-        width:min(320px,84vw);text-align:center}
+        text-align:center}
   h1{font-size:17px;font-weight:600;margin:0 0 8px}
   p{font-size:13px;color:#9aa3b2;margin:0 0 20px}
   input{width:100%;box-sizing:border-box;padding:12px;border-radius:10px;border:1px solid #3a4150;
@@ -232,20 +284,34 @@ const PAIR_PAGE = `<!doctype html>
          color:#fff;font-size:15px;font-weight:600;cursor:pointer}
   button:disabled{opacity:.5}
   .err{color:#f28b82;font-size:13px;margin-top:12px;min-height:18px}
+  .qr{background:#fff;display:inline-block;padding:8px;border-radius:10px;line-height:0}
+  .qrurl{font-size:11px;color:#9aa3b2;word-break:break-all;margin-top:10px;user-select:all}
+  .cap{font-size:11px;color:#9aa3b2;margin-top:8px}
 </style>
 </head>
 <body>
-  <div class="card">
-    <h1>配对 dsh</h1>
-    <p>输入电脑终端里显示的 6 位配对码</p>
-    <input id="code" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
-    <button id="go">配对</button>
-    <div class="err" id="err"></div>
+  <div class="stack">
+    <div class="card">
+      <h1>配对 dsh</h1>
+      <p>输入电脑终端里显示的 6 位配对码</p>
+      <input id="code" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
+      <button id="go">配对</button>
+      <div class="err" id="err"></div>
+    </div>
+    <div class="card" id="localcard" style="display:none">
+      <h1>扫码即配对</h1>
+      <p>手机扫这个码，配对码会自动填入并直接提交</p>
+      <div class="qr" id="qrimg"></div>
+      <div class="qrurl" id="qrurl"></div>
+      <div class="cap">这个二维码只在电脑本机打开本页时出现</div>
+    </div>
   </div>
 <script>
+const KITA_LOCAL = ${local ? 'true' : 'false'}
 const go = document.getElementById('go')
 const code = document.getElementById('code')
 const err = document.getElementById('err')
+let autoPair = false
 code.addEventListener('input', () => { err.textContent = '' })
 code.addEventListener('keydown', (e) => { if (e.key === 'Enter') pair() })
 go.addEventListener('click', pair)
@@ -259,9 +325,38 @@ async function pair() {
       body: JSON.stringify({ code: value }) })
     if (res.ok) { location.href = '/'; return }
     const body = await res.json().catch(() => ({}))
-    err.textContent = body.error || ('配对失败（HTTP ' + res.status + '）')
+    let message = body.error || ('配对失败（HTTP ' + res.status + '）')
+    if (autoPair) message += '，二维码里的配对码可能已轮换，请输入屏幕上的最新 6 位数字'
+    err.textContent = message
   } catch { err.textContent = '网络错误，请重试' }
+  autoPair = false
   go.disabled = false
+}
+// A scanned link carries the code in the fragment: fill it in, drop it from the
+// address bar so a screenshot or a shared URL cannot leak it, then submit.
+;(function autoFromHash() {
+  const match = /(?:^#?|&)k=(\\d{6})(?:&|$)/.exec(location.hash || '')
+  if (match === null) return
+  code.value = match[1]
+  try { history.replaceState(null, '', location.pathname + location.search) } catch (e) { /* ignore */ }
+  autoPair = true
+  pair()
+})()
+async function refreshQr() {
+  try {
+    const res = await fetch('/gateway-pair/qr.json', { cache: 'no-store' })
+    if (!res.ok) return
+    const data = await res.json()
+    document.getElementById('qrimg').innerHTML = data.svg || ''
+    document.getElementById('qrurl').textContent = data.svg
+      ? (data.url || '')
+      : '未取到本机局域网地址，请手动访问 http://<本机IP>:' + (data.port || '') + '/gateway-pair'
+  } catch (e) { /* retry next tick */ }
+}
+if (KITA_LOCAL) {
+  document.getElementById('localcard').style.display = 'block'
+  refreshQr()
+  setInterval(refreshQr, 5000)
 }
 </script>
 </body>
@@ -291,15 +386,27 @@ const ADMIN_PAGE = `<!doctype html>
   .row button{flex:none;background:#3a1d22;color:#f28b82;border:1px solid #5a2a32;border-radius:8px;
               padding:6px 12px;font-size:12px;cursor:pointer}
   .empty{font-size:13px;color:#9aa3b2}
+  .qr{margin-top:16px;background:#1a1d24;border:1px solid #2a2e38;border-radius:14px;padding:18px;
+      text-align:center}
+  .qr .h{font-size:12px;color:#9aa3b2;margin-bottom:10px}
+  .qr .img{background:#fff;display:inline-block;padding:8px;border-radius:10px;line-height:0}
+  .qr .url{font-size:11px;color:#9aa3b2;word-break:break-all;margin-top:10px;user-select:all}
+  .qr .cap{font-size:11px;color:#9aa3b2;margin-top:6px}
 </style>
 </head>
 <body>
   <div class="wrap">
     <h1>dsh 配对管理</h1>
-    <p class="sub">把配对码输入手机上的配对页即可。此页面仅本机可访问。</p>
+    <p class="sub">手机扫下面的二维码即完成配对；也可以手动把配对码输入手机上的配对页。此页面仅本机可访问。</p>
     <div class="code">
       <div class="h">当前配对码（自动轮换）</div>
       <div class="v" id="code">------</div>
+    </div>
+    <div class="qr">
+      <div class="h">扫码即配对（含当前配对码，随轮换自动更新）</div>
+      <div class="img" id="qrimg"></div>
+      <div class="url" id="qrurl"></div>
+      <div class="cap" id="qrcap">二维码只在电脑本机可见；Wi-Fi 不通手机时，可在电脑上开 cloudflared 隧道后用公网地址</div>
     </div>
     <div class="dev">
       <h2>已配对设备</h2>
@@ -311,12 +418,20 @@ const ADMIN_PAGE = `<!doctype html>
     </div>
   </div>
 <script>
+let lastQr = null
 async function refresh() {
   try {
     const res = await fetch('/admin/code')
     const data = await res.json()
     document.getElementById('code').textContent = data.code
     document.getElementById('fuse').style.display = data.fused ? 'block' : 'none'
+    // Re-render the QR only when its payload changed: rewriting the SVG every
+    // 5 seconds would make the code flicker while you line up the phone.
+    if (data.qrSvg !== lastQr) {
+      lastQr = data.qrSvg
+      document.getElementById('qrimg').innerHTML = data.qrSvg || ''
+      document.getElementById('qrurl').textContent = data.qrSvg ? (data.qrUrl || '') : '未取到本机局域网地址'
+    }
     const box = document.getElementById('devices')
     const devs = data.devices || []
     if (devs.length === 0) { box.innerHTML = '<div class="empty">暂无已配对设备</div>'; return }
@@ -361,68 +476,19 @@ setInterval(refresh, 5000)
 // gateway port. A relative fetch therefore works from both entry points: the
 // desktop page at 127.0.0.1:3080 and a phone page reverse-proxied through the
 // gateway. `connection.requestRejection` applies the same Host/Origin fence and
-// browser-session check every other host route uses.
+// browser-session check every other host route uses; when that service is not
+// visible in this context the fence is enforced locally instead of skipped
+// (see `fenceBuiltin`).
 //
-// A composition without webServer (or without connection) makes the whole
-// bridge a no-op: the gateway keeps working and simply has no panel.
+// A composition without webServer makes the whole bridge a no-op: the gateway
+// keeps working and simply has no panel.
 
 const PANEL_PATH = '/kita-gateway/panel'
 const PANEL_MAX_BODY = 4096
 
-/** Loopback, link-local and known virtual/VPN ranges cannot serve a phone. */
-function isUsableIp(ip) {
-  if (!/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(ip)) return false
-  if (ip.startsWith('127.') || ip.startsWith('169.254.') || ip.startsWith('0.')) return false
-  const [a, b] = ip.split('.').map(Number)
-  if (a === 0 || a === 26) return false // 26/8 = Radmin VPN
-  if (a === 100 && b >= 64 && b <= 127) return false // CGNAT / Tailscale
-  if (a >= 224) return false
-  return true
-}
-
-function ipPrefix(ip) {
-  const parts = String(ip).split('.')
-  return parts.length === 4 ? `${parts[0]}.${parts[1]}.${parts[2]}.` : ''
-}
-
-/** Same /24 as a recently active device wins; then LAN-looking ranges. */
-function scoreIp(ip, devicePrefixes) {
-  const [a, b] = ip.split('.').map(Number)
-  let score = devicePrefixes.includes(ipPrefix(ip)) ? 200 : 0
-  if (a === 192 && b === 168) score += 60
-  else if (a === 10) score += 40
-  else if (a === 172 && b >= 16 && b <= 31) score += 15
-  else score += 5
-  if (ip.startsWith('192.168.56.')) score -= 50 // VirtualBox host-only
-  return score
-}
-
-/**
- * Local IPv4 candidates for the phone entry URL, best first.
- * @param deviceIps - ips of recently active paired devices.
- * @returns at most five addresses.
- */
-function localCandidates(deviceIps) {
-  const prefixes = []
-  for (const ip of deviceIps) {
-    const prefix = ipPrefix(ip)
-    if (prefix !== '' && !prefixes.includes(prefix)) prefixes.push(prefix)
-    if (prefixes.length >= 5) break
-  }
-  const found = []
-  for (const list of Object.values(os.networkInterfaces())) {
-    for (const info of list ?? []) {
-      if (info.family !== 'IPv4' || info.internal) continue
-      if (!isUsableIp(info.address) || found.includes(info.address)) continue
-      found.push(info.address)
-    }
-  }
-  return found
-    .map((ip) => ({ ip, score: scoreIp(ip, prefixes) }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 5)
-    .map((entry) => entry.ip)
-}
+// Address ranking, the pairing URL and the entry-point rule live in
+// `lib/pair-util.js` so they can be asserted against without booting the
+// plugin (see `scripts/verify-gateway.mjs`).
 
 /**
  * Register the WebUI panel route on the dsh webserver.
@@ -438,16 +504,44 @@ function mountPanelBridge(ctx, api) {
     return false
   }
   const connection = ctx.get('connection')
-  if (connection === undefined) console.log('[kita-dsh-gateway] 面板桥：connection 不可见，跳过认证围栏')
+  if (connection === undefined) {
+    console.log('[kita-dsh-gateway] 面板桥：connection 不可见，改用内置 Host/Origin 围栏')
+  }
 
   const sendJson = (res, status, body) => {
     res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
     res.end(JSON.stringify(body))
   }
-  /** Host/Origin fence plus browser-session check; false = request answered. */
+
+  /**
+   * Host/Origin fence used when `connection` is not visible in this context.
+   * The official `connection.requestRejection` is preferred, but it applied
+   * *after* this plugin in the 2026-09 production boot (the log reads
+   * "connection 不可见"), and a panel that skips the fence entirely lets any
+   * web page POST revoke / unlock / tunnel actions at 127.0.0.1 from the user's
+   * own browser. So the same rule is enforced here: the Host header must name
+   * this webserver, and an Origin, when present, must match it.
+   */
+  const fenceBuiltin = (req) => {
+    const host = String(req.headers.host ?? '').toLowerCase()
+    if (!api.allowedHosts.includes(host)) return 403
+    const origin = req.headers.origin
+    if (typeof origin === 'string' && origin !== '') {
+      let originHost = ''
+      try {
+        originHost = new URL(origin).host.toLowerCase()
+      } catch {
+        return 403
+      }
+      if (!api.allowedHosts.includes(originHost)) return 403
+    }
+    return undefined
+  }
+  /** false = the fence answered the request itself. */
   const authorized = (req, res) => {
-    if (connection === undefined) return true
-    const rejection = connection.requestRejection({ headers: req.headers })
+    const rejection = connection !== undefined
+      ? connection.requestRejection({ headers: req.headers })
+      : fenceBuiltin(req)
     if (rejection === undefined) return true
     res.writeHead(rejection)
     res.end()
@@ -463,20 +557,31 @@ function mountPanelBridge(ctx, api) {
     req.on('error', () => resolve(''))
   })
 
-  const snapshot = () => {
+  const snapshot = (req) => {
     const devices = api.listDevices()
     const recent = devices.map((d) => (d.lastIp !== '' ? d.lastIp : d.ip)).filter((ip) => isUsableIp(ip))
+    const candidates = localCandidates(recent)
+    const entry = entryOf(req.headers, req.socket?.remoteAddress ?? '')
+    const code = api.getCode()
+    const tunnel = api.tunnelState()
     return {
       ok: true,
       port: api.port,
-      code: api.getCode(),
+      code,
       issuedAt: api.getIssuedAt(),
       codeMinutes: api.codeMinutes,
       fused: api.isFused(),
       failedThisHour: api.failedThisHour(),
-      candidates: localCandidates(recent),
+      candidates,
       recentIp: recent.length > 0 ? recent[0] : '',
       devices,
+      entry,
+      canControl: entry === ENTRY_LOCAL,
+      localPairUrl: candidates.length > 0 ? pairUrl(`http://${candidates[0]}:${api.port}`, code) : '',
+      tunnel: {
+        ...tunnel,
+        pairUrl: tunnel.url === '' ? '' : pairUrl(tunnel.url, code),
+      },
     }
   }
 
@@ -486,7 +591,7 @@ function mountPanelBridge(ctx, api) {
     handler: async (req, res) => {
       if (!authorized(req, res)) return
       if (req.method === 'GET') {
-        sendJson(res, 200, snapshot())
+        sendJson(res, 200, snapshot(req))
         return
       }
       if (req.method !== 'POST') {
@@ -501,6 +606,19 @@ function mountPanelBridge(ctx, api) {
         token = typeof parsed?.token === 'string' ? parsed.token : ''
       } catch {
         sendJson(res, 400, { ok: false, error: 'invalid JSON body' })
+        return
+      }
+      if (action === 'tunnel-start' || action === 'tunnel-stop') {
+        // Only the machine itself may move the public door: a paired phone —
+        // on the LAN or through the tunnel — must not be able to expose the
+        // gateway to the internet, nor to close a tunnel someone else uses.
+        const entry = entryOf(req.headers, req.socket?.remoteAddress ?? '')
+        if (entry !== ENTRY_LOCAL) {
+          sendJson(res, 403, { ok: false, error: '仅本机（电脑上打开的 dsh 页面）能开关隧道' })
+          return
+        }
+        const state = action === 'tunnel-start' ? await api.tunnelStart() : await api.tunnelStop()
+        sendJson(res, 200, { ok: state.error === '', tunnel: state, error: state.error })
         return
       }
       if (action === 'revoke') {
@@ -527,6 +645,24 @@ export function apply(ctx, config) {
   const port = config?.port ?? 3081
   const targetPort = config?.targetPort ?? 3080
   const codeMinutes = config?.codeMinutes ?? 10
+  const tunnelStartTimeoutMs = config?.tunnelStartTimeoutMs ?? 25000
+  /**
+   * The one-click Quick Tunnel. `resolveCloudflared` searches the configured
+   * path, then `CLOUDFLARED_PATH`, then `PATH`, so a machine that keeps the
+   * binary somewhere unusual only has to say so in the plugin config.
+   */
+  const cloudflared = resolveCloudflared(config?.cloudflaredPath ?? '')
+  const tunnel = createTunnel({
+    port,
+    binary: cloudflared,
+    restartLimit: config?.tunnelRestartLimit ?? 5,
+  })
+  if (cloudflared === '') {
+    console.log('[kita-dsh-gateway] 未找到 cloudflared，一键 Cloudflare 隧道不可用'
+      + '（配置 cloudflaredPath 或设置 CLOUDFLARED_PATH）')
+  } else {
+    console.log(`[kita-dsh-gateway] 一键 Cloudflare 隧道就绪：${cloudflared}`)
+  }
 
   const tokens = loadTokens()
   let currentCode = newCode()
@@ -547,22 +683,44 @@ export function apply(ctx, config) {
    */
   const clientIp = (req) => {
     const addr = req.socket.remoteAddress ?? ''
-    const local = addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1'
     const forwarded = req.headers['cf-connecting-ip']
-    if (local && typeof forwarded === 'string' && forwarded !== '') return forwarded
+    if (isLoopbackPeer(req) && typeof forwarded === 'string' && forwarded !== '') return forwarded
     return addr === '' ? 'unknown' : addr
   }
 
   /**
    * True only for a genuine local operator. A tunneled request ALWAYS counts
    * as remote even though cloudflared dials from 127.0.0.1 — otherwise the
-   * /admin surface (pairing code + device list + revoke) would be public
-   * through the tunnel.
+   * /admin surface (pairing code + device list + revoke) and the one-click
+   * tunnel switch would be reachable from the internet.
    */
   const isLoopback = (req) => {
     if (typeof req.headers['cf-connecting-ip'] === 'string' && req.headers['cf-connecting-ip'] !== '') return false
-    const addr = req.socket.remoteAddress ?? ''
-    return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1'
+    return isLoopbackPeer(req)
+  }
+
+  /** Addresses of recently active paired devices, best guess for "phone's /24". */
+  const recentDeviceIps = () => [...tokens.values()]
+    .map((meta) => (typeof meta?.lastIp === 'string' && meta.lastIp !== '' ? meta.lastIp : (meta?.ip ?? '')))
+    .filter((ip) => isUsableIp(ip))
+
+  /**
+   * The payload behind every scannable QR shown on this machine: the LAN URL a
+   * phone should open with the current code in its fragment, rendered as SVG.
+   * Never served to a remote caller — the code inside is the credential.
+   */
+  const pairingQr = () => {
+    const candidates = localCandidates(recentDeviceIps())
+    const url = candidates.length > 0 ? pairUrl(`http://${candidates[0]}:${port}`, currentCode) : ''
+    return {
+      code: currentCode,
+      url,
+      svg: url === '' ? '' : qrSvg(url),
+      candidates,
+      issuedAt: codeIssuedAt,
+      codeMinutes,
+      port,
+    }
   }
 
   const printCode = () => {
@@ -655,8 +813,21 @@ export function apply(ctx, config) {
     try { pathname = new URL(req.url, 'http://x').pathname } catch { /* keep '/' */ }
     if (req.method === 'POST' && pathname === '/pair') { handlePair(req, res); return }
     if (req.method === 'GET' && pathname === '/gateway-pair') {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-      res.end(PAIR_PAGE)
+      // The QR block (and the code it carries) appears only for a page opened
+      // on this machine; a phone, a LAN neighbour or a tunnel visitor gets the
+      // plain form.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
+      res.end(pairPage(isLoopback(req)))
+      return
+    }
+    if (req.method === 'GET' && pathname === '/gateway-pair/qr.json') {
+      if (!isLoopback(req)) {
+        res.writeHead(404)
+        res.end()
+        return
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+      res.end(JSON.stringify(pairingQr()))
       return
     }
     // Admin surface: loopback only (a remote client must already be paired).
@@ -680,8 +851,17 @@ export function apply(ctx, config) {
           lastIp: meta?.lastIp ?? '',
           lastActive: meta?.lastActive ?? 0,
         }))
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ code: currentCode, devices, fused: pairingFused, failedThisHour: globalFailures.length }))
+        const qr = pairingQr()
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+        res.end(JSON.stringify({
+          code: currentCode,
+          devices,
+          fused: pairingFused,
+          failedThisHour: globalFailures.length,
+          qrUrl: qr.url,
+          qrSvg: qr.svg,
+          candidates: qr.candidates,
+        }))
         return
       }
       if (req.method === 'POST' && pathname === '/admin/unlock') {
@@ -744,21 +924,48 @@ export function apply(ctx, config) {
   }, codeMinutes * 60 * 1000)
   codeTimer.unref()
 
-  server.listen(port, '0.0.0.0', () => {
-    console.log(`[kita-dsh-gateway] 网关已启动 http://0.0.0.0:${port} → 127.0.0.1:${targetPort}`)
-    printCode()
-  })
-  server.on('error', (error) => {
-    console.error('[kita-dsh-gateway] listen failed:', error.message)
-  })
+  /**
+   * Bind the entry port, retrying briefly when the old instance has not let go
+   * yet. A plugin reload (dsh-hot-reload) disposes the previous fiber and
+   * applies this one in the same tick, and `server.close()` releases the port
+   * asynchronously — without the retry the gateway would come back dead with
+   * "listen EADDRINUSE" while the web UI kept running, which is exactly the
+   * failure the 2026-09 blue/green switch hit on this port.
+   */
+  const listenDeadlineMs = Date.now() + 15000
+  const listenWithRetry = () => {
+    server.listen(port, '0.0.0.0', () => {
+      console.log(`[kita-dsh-gateway] 网关已启动 http://0.0.0.0:${port} → 127.0.0.1:${targetPort}`)
+      printCode()
+      // A previously started tunnel pointed at this port; if it is somehow
+      // still running (a reload that missed the teardown), keep it as is.
+      if (tunnel.state().phase === 'running') {
+        console.log(`[kita-dsh-gateway] Cloudflare 隧道仍在运行 ${tunnel.state().url}`)
+      }
+    })
+    server.on('error', (error) => {
+      if (error?.code === 'EADDRINUSE' && Date.now() < listenDeadlineMs) {
+        console.log(`[kita-dsh-gateway] ${port} 仍被占用，500ms 后重试监听`)
+        setTimeout(listenWithRetry, 500).unref?.()
+        return
+      }
+      console.error('[kita-dsh-gateway] listen failed:', error.message)
+    })
+  }
+  listenWithRetry()
 
   const panelApi = {
     port,
     codeMinutes,
+    /** Host header values this webserver may legitimately be reached by. */
+    allowedHosts: [`127.0.0.1:${targetPort}`, `localhost:${targetPort}`, `[::1]:${targetPort}`],
     getCode: () => currentCode,
     getIssuedAt: () => codeIssuedAt,
     isFused: () => pairingFused,
     failedThisHour: () => globalFailures.length,
+    tunnelState: () => tunnel.state(),
+    tunnelStart: () => tunnel.start(tunnelStartTimeoutMs),
+    tunnelStop: () => tunnel.stop(),
     listDevices: () => [...tokens.entries()]
       .map(([token, meta]) => ({
         token,
@@ -794,6 +1001,9 @@ export function apply(ctx, config) {
     clearInterval(codeTimer)
     if (persistTimer !== null) clearTimeout(persistTimer)
     saveState(tokens, currentCode)
+    // Never leave a public hostname pointing at a port this process just gave
+    // up: the tunnel dies with the plugin (a reload re-applies it cleanly).
+    void tunnel.dispose()
     server.close()
     for (const socket of server._sockets ?? []) socket.destroy()
     console.log('[kita-dsh-gateway] 网关已停止')

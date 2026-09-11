@@ -1,6 +1,7 @@
 # kita-dsh-gateway
 
-配对码鉴权网关：让 `dsh web` 保持 loopback-only，同时在局域网暴露**唯一一个带认证的入口**（默认 :3081）。
+配对码鉴权网关：让 `dsh web` 保持 loopback-only，同时在局域网暴露**唯一一个带认证的入口**（默认 :3081），
+并支持**扫码即配对**与**一键开启 Cloudflare 快速隧道**（外网用手机）。
 
 ## 解决的问题
 
@@ -10,7 +11,7 @@ dsh webserver 只监听 127.0.0.1，手机/其他设备访问不了；直接改�
 dsh 看到的是本地客户端（loopback 围栏通过、本地专属功能可用）；WebSocket 升级
 （mux/host 事件流）同样反代。
 
-**对抗的威胁**：局域网邻居，以及未来指向该端口的 frp / cloudflared / tailscale 隧道。
+**对抗的威胁**：局域网邻居，以及指向该端口的 frp / cloudflared / tailscale 隧道。
 **不防护**：本机已运行的进程（它们能读 token 文件）。
 
 ## 装配
@@ -22,50 +23,133 @@ dsh 看到的是本地客户端（loopback 围栏通过、本地专属功能可�
     - id: kita-dsh-gateway
       name: kita-dsh-gateway
       config:
-        port: 3081        # LAN 入口端口
-        targetPort: 3080  # dsh loopback 端口
-        codeMinutes: 10   # 配对码有效期（分钟）
+        port: 3081                    # LAN 入口端口
+        targetPort: 3080              # dsh loopback 端口
+        codeMinutes: 10               # 配对码有效期（分钟）
+        cloudflaredPath: ''           # 空 = 依次查 CLOUDFLARED_PATH、PATH
+        tunnelRestartLimit: 5         # 隧道进程意外退出后的自动重启上限
+        tunnelStartTimeoutMs: 25000   # tunnel-start 等待公网地址的上限
 ```
+
+`cloudflaredPath` 是**部署值**（本机路径写配置，不写进代码）：本机 cloudflared 不在 PATH，
+故在生产 profile 的 patch 里显式给出。未配置且探测不到时，隧道卡片会显示明确的提示，
+其余功能不受影响。
+
+## 扫码即配对
+
+手机扫二维码即完成配对，**不需要手输 6 位数字**：
+
+- 二维码内容 = `http://<LAN-IP>:3081/gateway-pair#k=<当前配对码>`；
+- 配对码放在 **URL fragment**：fragment 不发给服务器、不进访问日志、不随 Referer 外泄；
+- 配对页读取 fragment 后自动填入并提交，随后 `history.replaceState` 把 fragment 从地址栏抹掉
+  （截图或复制链接都不会带出配对码）；
+- 配对码随 `codeMinutes` 轮换，二维码同步刷新；若扫码时恰好轮换，页面会提示改用手输最新码。
+
+二维码出现的位置（三处，同一份数据）：
+
+| 位置 | 可见条件 | 说明 |
+|---|---|---|
+| WebUI「配对」页签 | 桌面/手机页面均可打开 | 大字配对码 + 二维码 + 访问地址候选 + 设备列表 |
+| `GET /admin` 本机管理页 | **仅本机**（loopback） | 配对码 + 二维码 + 设备吊销 + 熔断解锁 |
+| `GET /gateway-pair` 配对页 | 二维码区块**仅本机**显示 | 电脑上打开该页时可直接扫给手机 |
+
+**远程页面永不携带配对码**：`/gateway-pair` 与 `/gateway-pair/qr.json` 只在 loopback 请求下渲染二维码，
+局域网访客与隧道访客拿到的是纯输入框（否则任何能打开该页的人都能读到配对码，等于绕过整个鉴权）。
+`/admin` 整段路径同样 loopback-only。
+
+## 一键 Cloudflare 隧道
+
+面板上的「一键开启 CF 隧道」按钮（`POST /kita-gateway/panel { "action": "tunnel-start" }`）会拉起
+`cloudflared tunnel --url http://127.0.0.1:<port> --no-autoupdate`，即 Cloudflare Quick Tunnel：
+零配置、无需 CF 账号、随机 `https://<words>.trycloudflare.com` 域名，进程退出即失效。
+隧道建立后卡片显示公网地址、开启时间、公网二维码（同样内嵌配对码）与关闭按钮；
+进程意外退出会按 `tunnelRestartLimit` 自动重启，插件卸载/重载时隧道一并关闭。
+
+**「就绪」判定**：cloudflared 先打印 hostname，几秒后才打印 `Registered tunnel connection`；
+在两者之间公网请求会被边缘回 **HTTP 530**。因此 `tunnel-start` 等到注册行出现
+（最多 `READY_GRACE_MS` = 5s 的宽限）才返回，面板按钮在此期间显示「正在开启…」——
+否则用户会扫到一个 530 页面。
+
+**权限**：只有**本机页面**能开关隧道。手机（无论走局域网还是隧道）调用会得到 `403`：
+经局域网/隧道到达的请求会被拒绝，避免已配对的设备把网关暴露到公网或关掉他人正在使用的隧道。
 
 ## WebUI 配对面板
 
 同一个包带一个 client 半（`lib/client.js`，由 `package.json` 的 `dsh.client` 声明进 Web 模块图），
 在会话页签行 `conversation.view` 的 order 30 注册「配对」页 —— 排在移动端插件的 git 页之后。
 
-页面内容：当前配对码（大字 + 剩余轮换倒计时）、扫码直达配对页的二维码、
+页面内容：当前配对码（大字 + 剩余轮换倒计时）、扫码即配对的二维码、
 按「与手机最近来源同 /24」优先排序的本机访问地址候选（排除回环 / 链路本地 / Radmin / CGNAT 段）、
-已配对设备列表（UA 摘要、来源 IP、配对时间、最近活跃）与逐设备吊销；熔断时额外出现解锁按钮。
+**远程访问（CF 隧道）卡片**、已配对设备列表（UA 摘要、来源 IP、配对时间、最近活跃）与逐设备吊销；
+熔断时额外出现解锁按钮。
 
 数据来自 host 半在 dsh webserver 上注册的精确路由 `GET /kita-gateway/panel`；
-写操作走同一路由的 `POST { "action": "revoke" | "unlock" }`。用相对路径调用，
-桌面页面（loopback 端口）与经网关反代的手机页面（gateway 端口）都能直接命中；
-认证复用 `connection.requestRejection`（Host/Origin 围栏 + 浏览器会话 cookie），
-所以即使叠加隧道，配对码也不会落到未认证访客手里。
+写操作走同一路由的 `POST { "action": "revoke" | "unlock" | "tunnel-start" | "tunnel-stop" }`。
+用相对路径调用，桌面页面（loopback 端口）与经网关反代的手机页面（gateway 端口）都能直接命中。
+
+**认证围栏**：优先用 `connection.requestRejection`（Host/Origin 围栏 + 浏览器会话 cookie）；
+当该服务在当前上下文不可见时（2026-09 生产启动顺序即如此），**内置围栏接管而不是跳过** ——
+Host 必须为本 webserver，Origin 存在时必须同源，否则 403。没有这一步，任意网页都能从用户浏览器
+对 127.0.0.1 提交吊销/解锁/开隧道请求。
+
+**来源标记**：网关反代时剥离客户端自带的 `x-kita-gw-entry` 与 `cf-connecting-ip`，再按自己观察到的事实
+重新写入（`lan` / `tunnel`），webserver 侧据此判断请求来自哪扇门；伪造 `local` 不被采信。
+否则局域网客户端可以伪造 `CF-Connecting-IP` 把自己的失败尝试记进别人的限流桶。
 
 二维码编码器内联了 qrcode-generator（(c) Kazuhiko Arase, MIT）：client bundle 没有构建步骤、
 无法解析 node_modules；不用在线二维码 API，是为了让配对码不离开本机。
+host 侧（`lib/qr.js`，用于配对页与管理页的服务端渲染）与 client 侧是**同一份库正文**，
+由 `node scripts/sync-qr-encoder.mjs --check` 保证不漂移。
 
 ## 配对流程
 
 1. 启动 dsh 后控制台打印一次性配对码；
-2. 手机浏览器打开 `http://<主机LAN-IP>:3081`，输入配对码；
-3. 签发 90 天 token（`~/.dsh/storages/kita-dsh-gateway-tokens.json`，已哈希存储）；
-4. 后续访问免配对，直到 token 过期或主机删除存储文件。
+2. 手机浏览器打开 `http://<主机LAN-IP>:3081`（或扫二维码直达并自动配对）；
+3. 签发 90 天 token（`<DSH_HOME>/storages/kita-dsh-gateway-tokens.json`，只落哈希）；
+4. 后续访问免配对，直到 token 过期或主机吊销/删除存储文件。
+
+不在同一 Wi-Fi 时：在电脑面板上点「一键开启 CF 隧道」，用公网二维码扫码即可。
 
 ## 防护措施
 
 - 配对码随机生成、限时（`codeMinutes`）、单窗口最多 5 次尝试；
 - 失败突刺阶梯锁 IP：5 分钟 → 30 分钟 → 6 小时 → 24 小时 → 永久（至进程重启）；
 - 全局熔断：一小时 300 次失败直接关闭配对直至重启；
-- token 比较走 `timingSafeEqual`（哈希后），存储只落哈希。
+- token 比较走 `timingSafeEqual`（哈希后），存储只落哈希；
+- 配对码只在本机渲染（见上「扫码即配对」），隧道开关仅本机可操作。
 
 ## 安全警告
 
-配对成功即等于获得 dsh 完整操作权限。**仅限可信局域网使用，切勿直接暴露公网**；
-远程访问请叠加 frp / cloudflared / tailscale 等隧道并保管好配对码。
+配对成功即等于获得 dsh 完整操作权限。**默认仅在可信局域网使用**；
+开隧道会让公网可达，任何拿到配对码的人都能进入 —— 临时用完请及时关闭。
+隧道只暴露网关（带配对鉴权），永远不要直接把 `dsh web` 的 loopback 端口暴露出去。
+
+## 实测记录（2026-09-11）
+
+均为本机实测 `[MEASURED]`：
+
+- **扫码即配对**：无头浏览器打开 `http://127.0.0.1:3081/gateway-pair#k=<code>` → 自动提交、
+  地址跳转为 `http://127.0.0.1:3081/`（标题 `DeepSeek Harness`、composer 已渲染、无 console 报错），
+  设备列表新增该 token。
+- **真机经隧道**：Android 16 手机（中国移动 IPv6 出口）经 `*.trycloudflare.com` 完成配对，
+  网关日志记录到该设备的 UA 与 `CF-Connecting-IP`。
+- **隧道公网可达**：quick tunnel 建立后，公网请求 `https://<host>/gateway-pair` 返回 200
+  （`curl --resolve` 实测 connect 0.19s / total 1.36s），页面内容为 `KITA_LOCAL = false`（远程不渲染二维码）。
+- **530 窗口**：hostname 出现而注册行未出现时，公网请求得到 HTTP 530 —— 这就是 `start()` 要等注册行的原因。
+- **本机 DNS 陷阱**：隧道刚建立时本机解析器可能仍负缓存该域名（或给出本机无法路由的 AAAA），
+  使 `fetch` 报 `UND_ERR_CONNECT_TIMEOUT`，而 `curl --resolve` / 公共 DoH 立刻可用 ——
+  探针因此内置 DoH + IPv4 直连回退（`KITA_E2E_DOH`，默认阿里 DoH）。
 
 ## 测试
 
-`scripts/tunnel-e2e.mjs` 走配对→代理→WebSocket 升级的端到端链路；
-`scripts/tunnel-adversarial.mjs` 构造恶意客户端对抗用例（伪造头、旁路 token 等）。
-均需一个运行中的 dsh web 实例。
+```bash
+node scripts/verify-gateway.mjs        # 离线：59 项（纯函数、二维码、隧道状态机，含真实子进程）
+node scripts/pair-tunnel-e2e.mjs       # 在线：29 项（配对页可见性、配对流程、隧道权限）
+KITA_E2E_TUNNEL=1 node scripts/pair-tunnel-e2e.mjs   # 额外真实开停一次隧道
+node scripts/sync-qr-encoder.mjs --check             # host 与 client 二维码库同源校验
+```
+
+在线脚本读取 `KITA_GW_PORT` / `KITA_DSH_PORT` / `KITA_LAN_IP`（默认 3081 / 3080 / 自动探测），
+不写死任何本机地址；它会**只**撤销本次新建的配对设备，并保持运行前已存在的隧道与设备原样。
+另有 `scripts/tunnel-e2e.mjs`（配对→代理→WebSocket 升级）与 `scripts/tunnel-adversarial.mjs`
+（伪造头/旁路 token 对抗用例）。

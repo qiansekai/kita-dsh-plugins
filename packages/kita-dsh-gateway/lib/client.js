@@ -2481,6 +2481,87 @@ var qrcode = function() {
 			return data;
 		}
 
+		// ---- tunnel card --------------------------------------------------
+		/**
+		 * The "remote access" card: one button that opens a Cloudflare Quick
+		 * Tunnel for the gateway port, the public URL plus its scannable QR once
+		 * it is up, and the stop button. Only the machine itself may move this
+		 * switch, so both buttons are disabled — with the reason shown — when
+		 * the page is being viewed over the LAN or through the tunnel.
+		 */
+		function renderTunnelCard(data, busy, act, copyText) {
+			const tunnel = data.tunnel;
+			if (tunnel === null || typeof tunnel !== "object") return null;
+			const canControl = data.canControl === true;
+			const locked = busy !== "" || !canControl;
+			const lockedNote = canControl ? null : react.createElement("span", { className: "kitaPair_note" }, "仅本机页面可开关隧道");
+			const rows = [react.createElement("div", { className: "kitaPair_head", key: "h" }, "远程访问 · Cloudflare 隧道")];
+			if (tunnel.available !== true) {
+				rows.push(react.createElement("div", { className: "kitaPair_hint", key: "na" },
+					"未找到 cloudflared：在插件配置里设置 cloudflaredPath，或设置 CLOUDFLARED_PATH 环境变量后重载插件。"));
+			} else if (tunnel.phase === "running" || tunnel.phase === "starting") {
+				const tunnelQrUrl = typeof tunnel.pairUrl === "string" && tunnel.pairUrl !== ""
+					? tunnel.pairUrl
+					: (typeof tunnel.url === "string" && tunnel.url !== "" ? tunnel.url + "/gateway-pair" : "");
+				const qr = tunnelQrUrl !== "" ? buildQr(tunnelQrUrl) : null;
+				const started = typeof tunnel.startedAt === "number" && tunnel.startedAt > 0
+					? "开启于 " + formatTime(tunnel.startedAt)
+						+ (tunnel.restarts > 0 ? "（已自动重连 " + String(tunnel.restarts) + " 次）" : "")
+					: "正在与 Cloudflare 握手…";
+				rows.push(react.createElement("div", { className: "kitaPair_top", key: "top" },
+					react.createElement("div", { className: "kitaPair_col" },
+						tunnel.phase === "running"
+							? react.createElement("div", { className: "kitaPair_candUrl" }, tunnel.url)
+							: react.createElement("div", { className: "kitaPair_hint" }, "正在建立隧道，通常 5-20 秒…"),
+						react.createElement("div", { className: "kitaPair_count" }, started),
+						react.createElement("div", { className: "kitaPair_actions" },
+							tunnel.phase === "running" ? react.createElement("button", {
+								className: "kitaPair_btn kitaPair_btnSm", type: "button",
+								onClick: () => copyText(tunnel.url),
+							}, "复制公网地址") : null,
+							react.createElement("button", {
+								className: "kitaPair_btn kitaPair_btnSm kitaPair_btnDanger", type: "button",
+								disabled: locked,
+								onClick: () => act("tunnel-stop", undefined, "隧道已关闭"),
+							}, busy === "tunnel-stop" ? "正在关闭…" : "关闭隧道"),
+							lockedNote,
+						),
+						react.createElement("div", { className: "kitaPair_hint" },
+							"公网可达期间，任何拿到配对码的人都能进入 dsh；不用时请关闭。"),
+					),
+					qr === null ? null : react.createElement("div", { className: "kitaPair_qrBox", key: "qr" },
+						react.createElement("div", { className: "kitaPair_qr" },
+							react.createElement("svg", {
+								viewBox: "0 0 " + qr.count + " " + qr.count,
+								width: 148, height: 148, shapeRendering: "crispEdges",
+							}, react.createElement("path", { d: qr.d, fill: "#000" })),
+						),
+						react.createElement("div", { className: "kitaPair_qrCap" }, "扫码用公网地址配对"),
+					),
+				));
+			} else {
+				rows.push(react.createElement("div", { className: "kitaPair_hint", key: "off" },
+					"不在同一 Wi-Fi 时，开一条 Cloudflare 快速隧道（trycloudflare 随机域名、无需 CF 账号）："
+					+ "手机扫上面的公网二维码即配对，关掉立刻失效。"));
+				if (tunnel.phase === "error" && typeof tunnel.error === "string" && tunnel.error !== "") {
+					rows.push(react.createElement("div", { className: "kitaPair_err", key: "err" }, tunnel.error));
+				}
+				if (tunnel.phase === "error" && Array.isArray(tunnel.logs) && tunnel.logs.length > 0) {
+					rows.push(react.createElement("div", { className: "kitaPair_devMeta", key: "logs" },
+						tunnel.logs.slice(-4).join("\n")));
+				}
+				rows.push(react.createElement("div", { className: "kitaPair_actions", key: "act" },
+					react.createElement("button", {
+						className: "kitaPair_btn", type: "button",
+						disabled: locked,
+						onClick: () => act("tunnel-start", undefined, "隧道已建立，用公网地址或扫码配对"),
+					}, busy === "tunnel-start" ? "正在开启…" : "一键开启 CF 隧道"),
+					lockedNote,
+				));
+			}
+			return react.createElement("div", { className: "kitaPair_card", key: "tunnel" }, rows);
+		}
+
 		// ---- panel --------------------------------------------------------
 		function PairPanel() {
 			const [view, setView] = react.useState({ loading: true, data: null, error: "" });
@@ -2552,9 +2633,12 @@ var qrcode = function() {
 
 			if (data !== null) {
 				const candidates = Array.isArray(data.candidates) ? data.candidates : [];
-				const pairUrl = candidates.length > 0
-					? "http://" + candidates[0] + ":" + data.port + "/gateway-pair"
-					: "";
+				// The Host half hands over a ready-made URL with the pairing code in
+				// its fragment, so scanning pairs without typing. The fallback keeps
+				// a host half that predates that field working.
+				const pairUrl = typeof data.localPairUrl === "string" && data.localPairUrl !== ""
+					? data.localPairUrl
+					: (candidates.length > 0 ? "http://" + candidates[0] + ":" + data.port + "/gateway-pair" : "");
 				const qr = pairUrl !== "" ? buildQr(pairUrl) : null;
 				const left = countdown(data.issuedAt, data.codeMinutes);
 
@@ -2571,7 +2655,8 @@ var qrcode = function() {
 						}, "复制配对码"),
 					),
 					react.createElement("div", { className: "kitaPair_hint" },
-						"手机浏览器打开下方地址（或扫右侧二维码）后，输入这 6 位数字即可配对，签发 90 天凭据。"),
+						"手机扫右侧二维码即自动配对（码就在二维码里，随轮换自动更新）；"
+						+ "也可以打开下方地址手动输入这 6 位数字。配对后签发 90 天凭据。"),
 				);
 
 				const qrBox = qr === null ? null : react.createElement("div", { className: "kitaPair_qrBox", key: "qr" },
@@ -2581,7 +2666,7 @@ var qrcode = function() {
 							width: 168, height: 168, shapeRendering: "crispEdges",
 						}, react.createElement("path", { d: qr.d, fill: "#000" })),
 					),
-					react.createElement("div", { className: "kitaPair_qrCap" }, "扫码打开配对页"),
+					react.createElement("div", { className: "kitaPair_qrCap" }, "扫码即配对（含配对码）"),
 				);
 
 				children.push(react.createElement("div", { className: "kitaPair_card", key: "code" },
@@ -2618,6 +2703,9 @@ var qrcode = function() {
 				urlChildren.push(react.createElement("div", { className: "kitaPair_hint", key: "tip" },
 					"本机常有多张网卡（虚拟网卡 / VPN 在内），已按「与手机同网段」优先排序；不确定时逐个试。"));
 				children.push(react.createElement("div", { className: "kitaPair_card", key: "url" }, urlChildren));
+
+				const tunnelCard = renderTunnelCard(data, busy, act, copyText);
+				if (tunnelCard !== null) children.push(tunnelCard);
 
 				if (data.fused === true) {
 					children.push(react.createElement("div", { className: "kitaPair_card", key: "fuse" },

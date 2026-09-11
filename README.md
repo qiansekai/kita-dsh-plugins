@@ -8,7 +8,7 @@
 
 | 目录 | 名称 | 功能 | 平台 |
 |---|---|---|---|
-| [`packages/kita-dsh-gateway`](packages/kita-dsh-gateway) | kita-dsh-gateway | 配对码鉴权网关：dsh 保持 loopback，仅暴露一个带认证的 LAN 入口（HTTP + WebSocket 反代） | host |
+| [`packages/kita-dsh-gateway`](packages/kita-dsh-gateway) | kita-dsh-gateway | 配对码鉴权网关：dsh 保持 loopback，仅暴露一个带认证的 LAN 入口（HTTP + WebSocket 反代）；**扫码即配对**（二维码内嵌一次性码）+ **一键开启 Cloudflare 快速隧道**（外网用手机） | host + client |
 | [`packages/kita-mobile-panel`](packages/kita-mobile-panel) | kita-mobile-panel | 手机面板桥：ConPTY 终端（node-pty + WebSocket）、文件列表/预览/受限写操作（复制/剪切/移动/重命名/资源管理器打开）、受限 git 桥 | host |
 | [`packages/kita-session-title-auto`](packages/kita-session-title-auto) | kita-session-title-auto | all-prompts 会话标题自动重拟（旁路小模型，不碰主循环前缀缓存）+ 钉住工具 + 标题旁 ✨/📌 标记 | host + client |
 | [`packages/kita-workspace-ui`](packages/kita-workspace-ui) | kita-workspace-ui | 官方 ui-workspace fork：会话行内 rename/fork/archive 按钮 + 双击改名 + 完整标题 | client |
@@ -17,7 +17,9 @@
 ## 安全警告（重要）
 
 - **kita-dsh-gateway**：为「仅限可信局域网」设计。配对后即等于获得 dsh 完整操作权限，
-  切勿直接暴露公网；如需远程访问请叠加 frp/cloudflared/tailscale 等隧道并保持配对码保密。
+  切勿直接暴露公网；如需远程访问请在面板里用**一键 CF 隧道**（只暴露带鉴权的网关，用完即关）
+  或叠加 frp/tailscale，并保持配对码保密。配对码只在**本机**渲染进二维码/管理页，
+  远程访客拿到的是纯输入框；隧道开关也仅本机可操作（手机无论走局域网还是隧道都得到 403）。
 - **kita-mobile-panel**：终端路由即宿主机 shell（命令执行面）、文件路由可读写宿主机文件
   （写操作带显式守卫：绝对路径校验、重命名单段校验、目标存在即失败、目录禁止自嵌套；`reveal` 只弹资源管理器窗口不读写）。
   它依赖 kita-dsh-gateway 的配对鉴权，**不要在无鉴权环境下单独暴露这些路由**。
