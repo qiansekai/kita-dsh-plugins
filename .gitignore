@@ -1,3 +1,6 @@
 node_modules/
 *.log
 .DS_Store
+
+# backups written by Archive/dsh-envs/patches/rebase-kita-workspace-ui.py
+*.bak-prerebase-*

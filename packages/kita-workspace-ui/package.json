@@ -1,7 +1,7 @@
 {
   "name": "kita-workspace-ui",
   "description": "Fork of @deepseek-ai/dsh-client-ui-workspace: session-row actions shown directly (rename/fork/archive buttons), double-click title to rename, full (non-ellipsized) titles.",
-  "version": "0.1.2-rc.1",
+  "version": "0.1.5-rc.1",
   "publishConfig": {
     "access": "public"
   },
