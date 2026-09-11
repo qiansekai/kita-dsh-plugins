@@ -27,6 +27,24 @@ dsh 看到的是本地客户端（loopback 围栏通过、本地专属功能可�
         codeMinutes: 10   # 配对码有效期（分钟）
 ```
 
+## WebUI 配对面板
+
+同一个包带一个 client 半（`lib/client.js`，由 `package.json` 的 `dsh.client` 声明进 Web 模块图），
+在会话页签行 `conversation.view` 的 order 30 注册「配对」页 —— 排在移动端插件的 git 页之后。
+
+页面内容：当前配对码（大字 + 剩余轮换倒计时）、扫码直达配对页的二维码、
+按「与手机最近来源同 /24」优先排序的本机访问地址候选（排除回环 / 链路本地 / Radmin / CGNAT 段）、
+已配对设备列表（UA 摘要、来源 IP、配对时间、最近活跃）与逐设备吊销；熔断时额外出现解锁按钮。
+
+数据来自 host 半在 dsh webserver 上注册的精确路由 `GET /kita-gateway/panel`；
+写操作走同一路由的 `POST { "action": "revoke" | "unlock" }`。用相对路径调用，
+桌面页面（loopback 端口）与经网关反代的手机页面（gateway 端口）都能直接命中；
+认证复用 `connection.requestRejection`（Host/Origin 围栏 + 浏览器会话 cookie），
+所以即使叠加隧道，配对码也不会落到未认证访客手里。
+
+二维码编码器内联了 qrcode-generator（(c) Kazuhiko Arase, MIT）：client bundle 没有构建步骤、
+无法解析 node_modules；不用在线二维码 API，是为了让配对码不离开本机。
+
 ## 配对流程
 
 1. 启动 dsh 后控制台打印一次性配对码；

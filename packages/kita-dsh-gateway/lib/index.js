@@ -16,6 +16,7 @@
 import http from 'node:http'
 import net from 'node:net'
 import crypto from 'node:crypto'
+import os from 'node:os'
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
@@ -352,6 +353,170 @@ setInterval(refresh, 5000)
 </body>
 </html>`
 
+// ---------------------------------------------------------------------------
+// WebUI panel bridge
+// ---------------------------------------------------------------------------
+// The browser half (lib/client.js) adds a 「配对」 tab to the conversation view
+// row and reads this exact route on the dsh webserver (targetPort), not on the
+// gateway port. A relative fetch therefore works from both entry points: the
+// desktop page at 127.0.0.1:3080 and a phone page reverse-proxied through the
+// gateway. `connection.requestRejection` applies the same Host/Origin fence and
+// browser-session check every other host route uses.
+//
+// A composition without webServer (or without connection) makes the whole
+// bridge a no-op: the gateway keeps working and simply has no panel.
+
+const PANEL_PATH = '/kita-gateway/panel'
+const PANEL_MAX_BODY = 4096
+
+/** Loopback, link-local and known virtual/VPN ranges cannot serve a phone. */
+function isUsableIp(ip) {
+  if (!/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(ip)) return false
+  if (ip.startsWith('127.') || ip.startsWith('169.254.') || ip.startsWith('0.')) return false
+  const [a, b] = ip.split('.').map(Number)
+  if (a === 0 || a === 26) return false // 26/8 = Radmin VPN
+  if (a === 100 && b >= 64 && b <= 127) return false // CGNAT / Tailscale
+  if (a >= 224) return false
+  return true
+}
+
+function ipPrefix(ip) {
+  const parts = String(ip).split('.')
+  return parts.length === 4 ? `${parts[0]}.${parts[1]}.${parts[2]}.` : ''
+}
+
+/** Same /24 as a recently active device wins; then LAN-looking ranges. */
+function scoreIp(ip, devicePrefixes) {
+  const [a, b] = ip.split('.').map(Number)
+  let score = devicePrefixes.includes(ipPrefix(ip)) ? 200 : 0
+  if (a === 192 && b === 168) score += 60
+  else if (a === 10) score += 40
+  else if (a === 172 && b >= 16 && b <= 31) score += 15
+  else score += 5
+  if (ip.startsWith('192.168.56.')) score -= 50 // VirtualBox host-only
+  return score
+}
+
+/**
+ * Local IPv4 candidates for the phone entry URL, best first.
+ * @param deviceIps - ips of recently active paired devices.
+ * @returns at most five addresses.
+ */
+function localCandidates(deviceIps) {
+  const prefixes = []
+  for (const ip of deviceIps) {
+    const prefix = ipPrefix(ip)
+    if (prefix !== '' && !prefixes.includes(prefix)) prefixes.push(prefix)
+    if (prefixes.length >= 5) break
+  }
+  const found = []
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const info of list ?? []) {
+      if (info.family !== 'IPv4' || info.internal) continue
+      if (!isUsableIp(info.address) || found.includes(info.address)) continue
+      found.push(info.address)
+    }
+  }
+  return found
+    .map((ip) => ({ ip, score: scoreIp(ip, prefixes) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5)
+    .map((entry) => entry.ip)
+}
+
+/**
+ * Register the WebUI panel route on the dsh webserver.
+ * @param ctx - the gateway plugin context.
+ * @param api - live gateway state readers and mutators.
+ */
+function mountPanelBridge(ctx, api) {
+  const webServer = ctx.get('webServer')
+  if (webServer === undefined) return
+  const connection = ctx.get('connection')
+
+  const sendJson = (res, status, body) => {
+    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+    res.end(JSON.stringify(body))
+  }
+  /** Host/Origin fence plus browser-session check; false = request answered. */
+  const authorized = (req, res) => {
+    if (connection === undefined) return true
+    const rejection = connection.requestRejection({ headers: req.headers })
+    if (rejection === undefined) return true
+    res.writeHead(rejection)
+    res.end()
+    return false
+  }
+  const readBody = (req) => new Promise((resolve) => {
+    let body = ''
+    req.on('data', (chunk) => {
+      body += chunk
+      if (body.length > PANEL_MAX_BODY) req.destroy()
+    })
+    req.on('end', () => resolve(body))
+    req.on('error', () => resolve(''))
+  })
+
+  const snapshot = () => {
+    const devices = api.listDevices()
+    const recent = devices.map((d) => (d.lastIp !== '' ? d.lastIp : d.ip)).filter((ip) => isUsableIp(ip))
+    return {
+      ok: true,
+      port: api.port,
+      code: api.getCode(),
+      issuedAt: api.getIssuedAt(),
+      codeMinutes: api.codeMinutes,
+      fused: api.isFused(),
+      failedThisHour: api.failedThisHour(),
+      candidates: localCandidates(recent),
+      recentIp: recent.length > 0 ? recent[0] : '',
+      devices,
+    }
+  }
+
+  const route = webServer.register({
+    kind: 'exact',
+    path: PANEL_PATH,
+    handler: async (req, res) => {
+      if (!authorized(req, res)) return
+      if (req.method === 'GET') {
+        sendJson(res, 200, snapshot())
+        return
+      }
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      let action = ''
+      let token = ''
+      try {
+        const parsed = JSON.parse(await readBody(req))
+        action = typeof parsed?.action === 'string' ? parsed.action : ''
+        token = typeof parsed?.token === 'string' ? parsed.token : ''
+      } catch {
+        sendJson(res, 400, { ok: false, error: 'invalid JSON body' })
+        return
+      }
+      if (action === 'revoke') {
+        if (!/^[0-9a-f]{64}$/.test(token)) {
+          sendJson(res, 400, { ok: false, error: '设备凭据格式不正确，已拒绝执行' })
+          return
+        }
+        sendJson(res, 200, { ok: api.revoke(token) })
+        return
+      }
+      if (action === 'unlock') {
+        api.unlock()
+        sendJson(res, 200, { ok: true })
+        return
+      }
+      sendJson(res, 400, { ok: false, error: `unknown action: ${action}` })
+    },
+  })
+  ctx.effect(() => route)
+  console.log(`[kita-dsh-gateway] WebUI 配对面板已挂载 ${PANEL_PATH}`)
+}
+
 export function apply(ctx, config) {
   const port = config?.port ?? 3081
   const targetPort = config?.targetPort ?? 3080
@@ -359,6 +524,8 @@ export function apply(ctx, config) {
 
   const tokens = loadTokens()
   let currentCode = newCode()
+  /** When the current code was minted — the WebUI panel renders a countdown from it. */
+  let codeIssuedAt = Date.now()
   saveState(tokens, currentCode)
   const attempts = new Map() // ip -> { failures: number[], strikes: number, lockedUntil: number }
   const globalFailures = [] // failed-pair timestamps across all ips (pruned to the fuse window)
@@ -565,6 +732,7 @@ export function apply(ctx, config) {
 
   const codeTimer = setInterval(() => {
     currentCode = newCode()
+    codeIssuedAt = Date.now()
     saveState(tokens, currentCode)
     printCode()
   }, codeMinutes * 60 * 1000)
@@ -576,6 +744,36 @@ export function apply(ctx, config) {
   })
   server.on('error', (error) => {
     console.error('[kita-dsh-gateway] listen failed:', error.message)
+  })
+
+  mountPanelBridge(ctx, {
+    port,
+    codeMinutes,
+    getCode: () => currentCode,
+    getIssuedAt: () => codeIssuedAt,
+    isFused: () => pairingFused,
+    failedThisHour: () => globalFailures.length,
+    listDevices: () => [...tokens.entries()]
+      .map(([token, meta]) => ({
+        token,
+        ua: meta?.ua ?? '',
+        at: meta?.at ?? 0,
+        ip: meta?.ip ?? '',
+        lastIp: meta?.lastIp ?? '',
+        lastActive: meta?.lastActive ?? 0,
+      }))
+      .sort((a, b) => b.lastActive - a.lastActive),
+    revoke: (token) => {
+      const removed = tokens.delete(token)
+      if (removed) saveState(tokens, currentCode)
+      return removed
+    },
+    unlock: () => {
+      pairingFused = false
+      globalFailures.length = 0
+      attempts.clear()
+      console.log('[kita-dsh-gateway] WebUI 面板解锁：熔断与锁定已清除')
+    },
   })
 
   return () => {
