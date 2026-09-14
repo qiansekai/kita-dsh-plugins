@@ -72,6 +72,11 @@ export function resolveCloudflared(explicitPath, env = process.env) {
  * @param options.port - the local gateway port to expose.
  * @param options.binary - resolved cloudflared path ('' disables the feature).
  * @param options.restartLimit - automatic restarts after unexpected exits.
+ * @param options.protocol - cloudflared transport: `'auto'` (cloudflared
+ * prefers QUIC over UDP), `'http2'` (force TCP 443) or `'quic'`. Networks that
+ * silently drop QUIC leave `auto` retrying forever — the edge then has no
+ * connection and answers every public request with Error 1033 — so `http2` is
+ * what makes the tunnel usable there (see the 2026-09-14 note in DSH-SETUP.md).
  * @param options.log - logger with console's shape.
  * @param options.spawnImpl - process factory, injectable so the controller can
  * be exercised without a real cloudflared (`scripts/verify-gateway.mjs`).
@@ -85,6 +90,8 @@ export function createTunnel(options = {}) {
     : 5
   const log = options.log ?? console
   const spawnImpl = typeof options.spawnImpl === 'function' ? options.spawnImpl : spawn
+  /** Transport override; anything unrecognized means cloudflared's own choice. */
+  const protocol = options.protocol === 'http2' || options.protocol === 'quic' ? options.protocol : 'auto'
 
   let current = null // live child process, null when stopped
   let url = ''
@@ -182,6 +189,7 @@ export function createTunnel(options = {}) {
   const state = () => ({
     available: binary !== '',
     binary,
+    protocol,
     phase: current !== null
       ? (url === '' ? 'starting' : 'running')
       : (restartTimer !== null ? 'starting' : (error === '' ? 'stopped' : 'error')),
@@ -221,6 +229,9 @@ export function createTunnel(options = {}) {
     pending = ''
     lines.length = 0
     const args = ['tunnel', '--url', `http://127.0.0.1:${port}`, '--no-autoupdate']
+    // `auto` is left to cloudflared (it prefers QUIC). A forced protocol is what
+    // rescues networks where QUIC never registers — see the option docs above.
+    if (protocol !== 'auto') args.push('--protocol', protocol)
     let proc = null
     try {
       proc = spawnImpl(binary, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })

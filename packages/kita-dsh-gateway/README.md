@@ -28,6 +28,7 @@ dsh 看到的是本地客户端（loopback 围栏通过、本地专属功能可�
         codeMinutes: 10               # 配对码有效期（分钟）
         cloudflaredPath: ''           # 空 = 依次查 CLOUDFLARED_PATH、PATH
         tunnelRestartLimit: 5         # 隧道进程意外退出后的自动重启上限
+        tunnelProtocol: http2         # 隧道传输：auto | http2 | quic（默认 http2，见下）
         tunnelStartTimeoutMs: 25000   # tunnel-start 等待公网地址的上限
 ```
 
@@ -69,6 +70,15 @@ dsh 看到的是本地客户端（loopback 围栏通过、本地专属功能可�
 在两者之间公网请求会被边缘回 **HTTP 530**。因此 `tunnel-start` 等到注册行出现
 （最多 `READY_GRACE_MS` = 5s 的宽限）才返回，面板按钮在此期间显示「正在开启…」——
 否则用户会扫到一个 530 页面。
+
+**传输协议（`tunnelProtocol`，默认 `http2`）**：`auto` 会让 cloudflared 首选 QUIC（UDP 7844），
+而**部分网络静默丢弃 QUIC**（校园网 / 访客 Wi-Fi / 个别运营商链路）——这时 cloudflared 反复报
+`Failed to dial a quic connection ... timeout: no recent network activity`，边缘连接数恒为 0，
+公网请求被判「隧道无连接」，边缘直接回 **Error 1033（Argo Tunnel error）**（刚建好的一瞬是 530）。
+`http2` 强制 TCP 443，这些网络能过。实测 2026-09-14 HNGY：同一链路 `--protocol quic` 连拨 30s
+**零注册**，`--protocol http2` **1 秒** 打出 `Registered tunnel connection`；端到端 http2 隧道得
+**401**（网关配对保护，说明请求真的到达网关），QUIC 隧道得 **530**。需要 QUIC 时把该项设为
+`auto`/`quic`。`state().protocol` 会回报实际使用的传输，便于面板/日志归因。
 
 **权限**：只有**本机页面**能开关隧道。手机（无论走局域网还是隧道）调用会得到 `403`：
 经局域网/隧道到达的请求会被拒绝，避免已配对的设备把网关暴露到公网或关掉他人正在使用的隧道。

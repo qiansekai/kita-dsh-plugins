@@ -47,6 +47,16 @@ export const Config = z.object({
   cloudflaredPath: z.string().default(''),
   /** Automatic restarts after the tunnel process dies unexpectedly. */
   tunnelRestartLimit: z.natural().max(50).default(5),
+  /**
+   * Transport for the one-click Quick Tunnel. `auto` leaves the choice to
+   * cloudflared, which prefers QUIC over UDP — on a network that silently
+   * drops QUIC (campus and guest Wi-Fi, some carrier links) that preference
+   * never registers, so the tunnel shows zero edge connections and Cloudflare
+   * answers every public request with Error 1033. `http2` forces TCP 443,
+   * which those networks pass. Measured 2026-09-14 on HNGY: `quic` failed to
+   * dial for 30s straight while `http2` registered in 1s.
+   */
+  tunnelProtocol: z.enum(['auto', 'http2', 'quic']).default('http2'),
   /** How long a `tunnel-start` request waits for the public URL. */
   tunnelStartTimeoutMs: z.natural().max(120000).default(25000),
 })
@@ -656,6 +666,7 @@ export function apply(ctx, config) {
     port,
     binary: cloudflared,
     restartLimit: config?.tunnelRestartLimit ?? 5,
+    protocol: config?.tunnelProtocol ?? 'http2',
   })
   if (cloudflared === '') {
     console.log('[kita-dsh-gateway] 未找到 cloudflared，一键 Cloudflare 隧道不可用'

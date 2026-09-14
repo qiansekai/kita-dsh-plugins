@@ -191,6 +191,48 @@ console.log('\n[5] tunnel controller')
 }
 
 {
+  // Networks that silently drop QUIC never reach "Registered tunnel
+  // connection", so the edge answers the public URL with Error 1033. A forced
+  // protocol is the escape hatch, and `auto` must stay byte-identical to the
+  // argv this controller has always produced.
+  const capture = (options) => {
+    const spawned = []
+    const tunnel = createTunnel({
+      port: 3081,
+      binary: 'cloudflared',
+      log: { log() {}, error() {} },
+      ...options,
+      spawnImpl: (bin, args, opts) => {
+        const proc = fakeProcess()
+        spawned.push({ bin, args, opts })
+        return proc
+      },
+    })
+    return { tunnel, spawned }
+  }
+
+  const forced = capture({ protocol: 'http2' })
+  await forced.tunnel.start(2000)
+  equal('a forced protocol reaches cloudflared',
+    forced.spawned[0].args.join(' '),
+    'tunnel --url http://127.0.0.1:3081 --no-autoupdate --protocol http2')
+  equal('the forced protocol is reported', forced.tunnel.state().protocol, 'http2')
+  await forced.tunnel.dispose()
+
+  const automatic = capture({ protocol: 'auto' })
+  await automatic.tunnel.start(2000)
+  equal('auto leaves the transport to cloudflared',
+    automatic.spawned[0].args.join(' '), 'tunnel --url http://127.0.0.1:3081 --no-autoupdate')
+  await automatic.tunnel.dispose()
+
+  const unknown = capture({ protocol: 'not-a-protocol' })
+  await unknown.tunnel.start(2000)
+  equal('an unknown transport falls back to auto',
+    unknown.spawned[0].args.join(' '), 'tunnel --url http://127.0.0.1:3081 --no-autoupdate')
+  await unknown.tunnel.dispose()
+}
+
+{
   // The tunnel must refuse to pretend it works when the binary is missing.
   const tunnel = createTunnel({ port: 3081, binary: '', log: { log() {}, error() {} } })
   equal('no binary -> unavailable', tunnel.state().available, false)
