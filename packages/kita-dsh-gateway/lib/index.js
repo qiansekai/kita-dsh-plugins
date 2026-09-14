@@ -55,8 +55,11 @@ export const Config = z.object({
    * answers every public request with Error 1033. `http2` forces TCP 443,
    * which those networks pass. Measured 2026-09-14 on HNGY: `quic` failed to
    * dial for 30s straight while `http2` registered in 1s.
+   *
+   * Note: schemastery exposes `z.union`, not `z.enum` — `z.enum` is undefined
+   * and throws while the plugin loads, taking the whole gateway down with it.
    */
-  tunnelProtocol: z.enum(['auto', 'http2', 'quic']).default('http2'),
+  tunnelProtocol: z.union(['auto', 'http2', 'quic']).default('http2'),
   /** How long a `tunnel-start` request waits for the public URL. */
   tunnelStartTimeoutMs: z.natural().max(120000).default(25000),
 })
