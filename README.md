@@ -13,6 +13,7 @@
 | [`packages/kita-session-title-auto`](packages/kita-session-title-auto) | kita-session-title-auto | all-prompts 会话标题自动重拟（旁路小模型，不碰主循环前缀缓存）+ 钉住工具 + 标题旁 ✨/📌 标记 | host + client |
 | [`packages/kita-workspace-ui`](packages/kita-workspace-ui) | kita-workspace-ui | 官方 ui-workspace fork：会话行内 rename/fork/archive 按钮 + 双击改名 + 完整标题 | client |
 | [`packages/dsh-quota-retry`](packages/dsh-quota-retry) | @dsh-external/dsh-quota-retry | 额度不足（QUOTA）无界长退避 + 鉴权失败（AUTH）有界短退避的自动重试 | host |
+| [`packages/kita-dsh-notify`](packages/kita-dsh-notify) | kita-dsh-notify | 会话完成 / 出错时的 Windows 桌面通知：Host 侧直接弹 toast，**不依赖浏览器页面，也不受当前查看哪个会话影响** | host |
 
 ## 安全警告（重要）
 
