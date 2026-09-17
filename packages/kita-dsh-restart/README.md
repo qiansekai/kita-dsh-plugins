@@ -23,6 +23,12 @@ Object 随任务终结被杀」是同一机制；实测 `IsProcessInJob(dsh) => 
 `restart-dsh.ps1` **不重复实现**停旧起新：它调部署自己的 `start.ps1`（停占用端口的实例、清
 孤儿 `.credentials.yaml.lock`、起新实例、捕获 launch token、等端口 LISTEN）。重启流程单一数据源。
 
+它用 `Start-Process` + **文件重定向**运行 `start.ps1`，**绝不用管道**：`start.ps1` 起的 dsh 会继承
+父进程的句柄，管道要一直开到 dsh 退出为止 —— 任务实例于是永远停在 `Status=Running`，而
+`MultipleInstancesPolicy=IgnoreNew` 会让之后每次 `/Run` 静默失效，**按钮一次即废**（2026-09-18
+实测踩到，并用「旧脚本挂起 / 新脚本正常」的对照实验复现与验证）。任务另有 `ExecutionTimeLimit=PT5M`
+兜底，host 侧遇 `/Run` 失败会先 `/End` 再重试。
+
 ## 计划任务
 
 - 名称 `kita-dsh-restart`（`config.taskName` 可改）。

@@ -84,9 +84,38 @@ $pwshExe = (Get-Process -Id $PID).Path
 $startArgs = @('-NoProfile', '-File', $startScript)
 if ($Port -gt 0) { $startArgs += @('-Port', "$Port") }
 
+# start.ps1 runs through Start-Process with FILE redirection — never through a
+# pipeline. The instance start.ps1 launches (dsh) inherits the handles handed to
+# its parent, so a pipeline stays open for as long as dsh lives; this task
+# instance would then never finish, sitting at Status=Running forever. With
+# MultipleInstancesPolicy=IgnoreNew that silently blocks every later /Run —
+# i.e. the restart button stops working after its first use. Measured 2026-09-18:
+# `& $pwshExe ... | ForEach-Object` wedged exactly this way while the restart
+# itself still succeeded.
+$startLog = ''
+if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
+  $startLog = Join-Path (Split-Path -Parent $LogPath) ("start-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + ".log")
+}
 Write-Log "invoking: $pwshExe $($startArgs -join ' ')"
-& $pwshExe @startArgs *>&1 | ForEach-Object { Write-Log "start.ps1: $_" }
-Write-Log "start.ps1 exited with code $LASTEXITCODE"
+$startProcArgs = @{
+  FilePath     = $pwshExe
+  ArgumentList = $startArgs
+  WindowStyle  = 'Hidden'
+  PassThru     = $true
+}
+if ($startLog -ne '') {
+  $startProcArgs.RedirectStandardOutput = $startLog
+  $startProcArgs.RedirectStandardError = "$startLog.err"
+}
+$startProc = Start-Process @startProcArgs
+if (-not $startProc.WaitForExit(180000)) {
+  Write-Log 'WARN: start.ps1 did not exit within 180s; continuing to the self-check'
+}
+$exitCode = $startProc.ExitCode
+Write-Log "start.ps1 exited with code $exitCode (output: $startLog)"
+if ($startLog -ne '' -and (Test-Path $startLog)) {
+  Get-Content $startLog -ErrorAction SilentlyContinue | ForEach-Object { Write-Log "start.ps1: $_" }
+}
 
 # Post-restart self-check: answering this plugin's OWN route proves the new
 # process loaded the plugin tree with kita-dsh-restart mounted. Without it, a
@@ -112,4 +141,4 @@ if ($Port -gt 0) {
   }
 }
 
-exit $LASTEXITCODE
+exit $exitCode

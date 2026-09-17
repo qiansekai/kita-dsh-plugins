@@ -176,7 +176,10 @@ function buildTaskXml(options) {
     '    <Hidden>false</Hidden>',
     '    <RunOnlyIfIdle>false</RunOnlyIfIdle>',
     '    <WakeToRun>false</WakeToRun>',
-    '    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>',
+    // Bounded, so a wedged task instance can never sit at Status=Running
+    // forever: under IgnoreNew that would silently disable the button.
+    // 5 minutes is far above the real budget (delay + start.ps1 + self-check).
+    '    <ExecutionTimeLimit>PT5M</ExecutionTimeLimit>',
     '    <Priority>7</Priority>',
     '  </Settings>',
     '  <Actions Context="Author">',
@@ -353,7 +356,16 @@ export function apply(ctx, config) {
 
   /** Start the registered task; the restart happens outside dsh's process tree. */
   async function startTask() {
-    const result = await runFile('schtasks', ['/Run', '/TN', config.taskName])
+    let result = await runFile('schtasks', ['/Run', '/TN', config.taskName])
+    if (result.code !== 0) {
+      // An instance still marked Running turns /Run into a no-op under
+      // MultipleInstancesPolicy=IgnoreNew, so end it once and retry: otherwise
+      // a single wedged run keeps the button dead until the time limit expires.
+      const firstDetail = (result.stderr || result.message).trim()
+      appendLog(`schtasks /Run failed (${firstDetail}); ending any running instance and retrying`)
+      await runFile('schtasks', ['/End', '/TN', config.taskName])
+      result = await runFile('schtasks', ['/Run', '/TN', config.taskName])
+    }
     if (result.code === 0) return { ok: true, mode: 'task' }
     const detail = (result.stderr || result.message).trim()
     if (!config.fallbackSpawn) return { ok: false, mode: 'task', error: detail }
