@@ -1,0 +1,30 @@
+{
+  "name": "kita-dsh-restart",
+  "version": "1.0.0",
+  "description": "One-click dsh web restart from the browser GUI: a sidebar-foot button backed by an on-demand scheduled task, so the restart survives the process that requested it.",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  },
+  "files": [
+    "lib",
+    "scripts",
+    "README.md"
+  ],
+  "dependencies": {},
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "license": "MIT"
+}
