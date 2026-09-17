@@ -4,7 +4,7 @@
  *
  * Two seats share one store:
  *   sidebar.footer.action  the button beside Settings (narrow = icon-only rail)
- *   shell.overlay          the confirmation and progress card, bottom-right
+ *   shell.overlay          the confirmation and progress card, top-center
  *
  * Restart flow: click -> confirm card -> POST /kita-restart/run -> poll
  * /kita-restart/status until the reported `bootId` differs from the one that
@@ -41,7 +41,7 @@ window.__ModuleLoader__.load({
 			".kitaRestartBtnSpin{animation:kitaRestartSpin 1s linear infinite;transform-origin:50% 50%}",
 			"@keyframes kitaRestartSpin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}",
 			".kitaRestartLabel{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
-			".kitaRestartCard{position:fixed;right:16px;bottom:16px;z-index:60;pointer-events:auto;",
+			".kitaRestartCard{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:60;pointer-events:auto;",
 			"box-sizing:border-box;width:352px;max-width:calc(100vw - 32px);padding:14px 14px 12px;",
 			"background:var(--dsw-specific-menu,var(--dsw-alias-bg-base));",
 			"border:.5px solid var(--dsw-alias-border-l4);border-radius:12px;",
