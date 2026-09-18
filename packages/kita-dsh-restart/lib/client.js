@@ -4,7 +4,8 @@
  *
  * Two seats share one store:
  *   sidebar.footer.action  the button beside Settings (narrow = icon-only rail)
- *   shell.overlay          the confirmation and progress card, top-center
+ *   shell.overlay          the confirmation and progress modal, viewport-centered
+ *                          behind a dismissible mask (click mask or press Esc)
  *
  * Restart flow: click -> confirm card -> POST /kita-restart/run -> poll
  * /kita-restart/status until the reported `bootId` differs from the one that
@@ -33,7 +34,9 @@ window.__ModuleLoader__.load({
 			".kitaRestartBtn{display:inline-flex;align-items:center;gap:8px;box-sizing:border-box;",
 			"width:calc(100% + 4px);height:42px;margin:0 -2px;padding:0 10px 0 8px;",
 			"border:none;border-radius:12px;background:transparent;color:var(--dsw-alias-label-primary);",
-			"font-family:inherit;font-size:14px;cursor:pointer;overflow:hidden;flex:none}",
+			"font-family:inherit;font-size:14px;cursor:pointer;overflow:hidden;flex:none;",
+			"transition:background-color .16s ease,color .16s ease}",
+			".kitaRestartBtn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}",
 			".kitaRestartBtn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}",
 			".kitaRestartBtn:disabled{opacity:.55;cursor:default}",
 			".kitaRestartBtn_rail{width:36px;height:36px;margin:0;padding:0;border-radius:50%;justify-content:center;gap:0}",
@@ -41,20 +44,39 @@ window.__ModuleLoader__.load({
 			".kitaRestartBtnSpin{animation:kitaRestartSpin 1s linear infinite;transform-origin:50% 50%}",
 			"@keyframes kitaRestartSpin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}",
 			".kitaRestartLabel{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
-			".kitaRestartCard{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:60;pointer-events:auto;",
-			"box-sizing:border-box;width:352px;max-width:calc(100vw - 32px);padding:14px 14px 12px;",
-			"background:var(--dsw-specific-menu,var(--dsw-alias-bg-base));",
+			// Viewport-centered modal layer: the shell.overlay host is a click-through",
+			// absolute layer, so this entry opts back into pointer events and paints its",
+			// own mask. Centering lives on the flex layer (not on the card transform), so",
+			// the card's own scale/translate keyframes stay free of layout offsets.
+			".kitaRestartOverlay{position:fixed;inset:0;z-index:60;pointer-events:auto;box-sizing:border-box;",
+			"display:flex;align-items:center;justify-content:center;padding:24px;",
+			"animation:kitaRestartLayerIn .16s ease-out}",
+			".kitaRestartMask{position:absolute;inset:0;background:var(--dsw-alias-bg-mask-1);",
+			"backdrop-filter:var(--dsw-mask-blur);-webkit-backdrop-filter:var(--dsw-mask-blur)}",
+			".kitaRestartCard{position:relative;z-index:1;box-sizing:border-box;width:352px;max-width:100%;",
+			"padding:14px 14px 12px;background:var(--dsw-specific-menu,var(--dsw-alias-bg-base));",
 			"border:.5px solid var(--dsw-alias-border-l4);border-radius:12px;",
 			"box-shadow:var(--dsw-elevation-prominent);color:var(--dsw-alias-label-primary);",
-			"font-family:inherit;font-size:13px;line-height:19px}",
+			"font-family:inherit;font-size:13px;line-height:19px;",
+			"animation:kitaRestartCardIn .2s cubic-bezier(.16,1,.3,1)}",
+			".kitaRestartOverlay.kitaRestartLeave{animation:kitaRestartLayerOut .14s ease-in forwards}",
+			".kitaRestartOverlay.kitaRestartLeave .kitaRestartCard{animation:kitaRestartCardOut .14s ease-in forwards}",
+			"@keyframes kitaRestartLayerIn{from{opacity:0}to{opacity:1}}",
+			"@keyframes kitaRestartLayerOut{from{opacity:1}to{opacity:0}}",
+			"@keyframes kitaRestartCardIn{from{opacity:0;transform:translateY(8px) scale(.97)}to{opacity:1;transform:none}}",
+			"@keyframes kitaRestartCardOut{from{opacity:1;transform:none}to{opacity:0;transform:scale(.98)}}",
+			"@media (prefers-reduced-motion:reduce){.kitaRestartOverlay,.kitaRestartCard{animation:none}}",
 			".kitaRestartCardTitle{font-size:14px;font-weight:500;line-height:20px;margin-bottom:6px}",
 			".kitaRestartCardText{color:var(--dsw-alias-label-secondary)}",
 			".kitaRestartCardMeta{color:var(--dsw-alias-label-tertiary);margin-top:6px;font-size:12px;line-height:18px}",
 			".kitaRestartCardError{color:var(--dsw-alias-state-error-primary);margin-top:6px;font-size:12px;line-height:18px;word-break:break-word}",
 			".kitaRestartCardRow{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}",
 			".kitaRestartAction{height:30px;padding:0 12px;border-radius:8px;cursor:pointer;font-family:inherit;font-size:13px;",
-			"border:.5px solid var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary)}",
+			"border:.5px solid var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);",
+			"transition:background-color .16s ease,border-color .16s ease,filter .16s ease,transform .1s ease}",
 			".kitaRestartAction:hover{background:var(--dsw-alias-interactive-bg-hover)}",
+			".kitaRestartAction:active{transform:scale(.98)}",
+			".kitaRestartAction:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}",
 			".kitaRestartAction_primary{background:var(--dsw-alias-state-error-primary);border-color:transparent;color:#fff}",
 			".kitaRestartAction_primary:hover{filter:brightness(1.08);background:var(--dsw-alias-state-error-primary)}"
 		].join("");
@@ -70,6 +92,8 @@ window.__ModuleLoader__.load({
 		const POLL_INTERVAL_MS = 1500;
 		const WAIT_TIMEOUT_MS = 180000;
 		const RELOAD_DELAY_MS = 900;
+		/** Must cover the exit keyframes below; the card unmounts after it elapses. */
+		const EXIT_ANIMATION_MS = 160;
 
 		/** Read the host restart status; throws while the process is down. */
 		async function fetchStatus() {
@@ -265,15 +289,55 @@ window.__ModuleLoader__.load({
 			]);
 		}
 
-		/** Frame-wide surface: the confirmation and progress card. */
+		/** Frame-wide surface: the confirmation and progress modal. */
 		function RestartOverlay({ restart }) {
 			const [snapshot, setSnapshot] = react.useState(restart.get());
 			react.useEffect(() => restart.subscribe(() => setSnapshot(restart.get())), [restart]);
 			const phase = snapshot.phase;
-			if (phase === "idle" || phase === "ready") return null;
+			const open = phase !== "idle" && phase !== "ready";
+			const [mounted, setMounted] = react.useState(open);
+			const [leaving, setLeaving] = react.useState(false);
+			// Frozen while leaving, so the exit animation cannot flash the next phase's copy.
+			const [shownPhase, setShownPhase] = react.useState(phase);
+
+			// Keep the card mounted through its exit keyframes, then unmount it.
+			react.useEffect(() => {
+				if (open) {
+					setLeaving(false);
+					setMounted(true);
+					return undefined;
+				}
+				if (!mounted) return undefined;
+				setLeaving(true);
+				const timer = setTimeout(() => {
+					setLeaving(false);
+					setMounted(false);
+				}, EXIT_ANIMATION_MS);
+				return () => clearTimeout(timer);
+			}, [open, mounted]);
+
+			react.useEffect(() => {
+				if (open) setShownPhase(phase);
+			}, [open, phase]);
+
+			// Esc mirrors a mask click while the modal is settled on screen.
+			react.useEffect(() => {
+				if (!mounted || leaving) return undefined;
+				const onKeyDown = (event) => {
+					if (event.key !== "Escape") return;
+					event.preventDefault();
+					restart.cancel();
+				};
+				document.addEventListener("keydown", onKeyDown);
+				return () => document.removeEventListener("keydown", onKeyDown);
+			}, [mounted, leaving, restart]);
+
+			if (!mounted) return null;
 
 			const rows = [];
-			if (phase === "confirm") {
+			let role = "dialog";
+			let aria = { "aria-label": "重启 DSH Web" };
+			if (shownPhase === "confirm") {
 				rows.push(react.createElement("div", { className: "kitaRestartCardTitle", key: "t" }, "重启 DSH Web？"));
 				rows.push(react.createElement("div", { className: "kitaRestartCardText", key: "b" },
 					"将停止当前 dsh 进程并重新启动它，用于加载新的 host 侧插件或配置。",
@@ -294,10 +358,9 @@ window.__ModuleLoader__.load({
 						onClick: () => { void restart.begin(4); }
 					}, "确认重启")
 				]));
-				return react.createElement("div", { className: "kitaRestartCard", role: "dialog", "aria-label": "重启 DSH Web" }, rows);
-			}
-
-			if (phase === "restarting") {
+			} else if (shownPhase === "restarting") {
+				role = "status";
+				aria = { "aria-live": "polite" };
 				rows.push(react.createElement("div", { className: "kitaRestartCardTitle", key: "t" }, "正在重启 DSH Web…"));
 				rows.push(react.createElement("div", { className: "kitaRestartCardText", key: "b" }, "进程正在退出并重新启动。页面恢复连接后会自动刷新。"));
 				rows.push(react.createElement("div", { className: "kitaRestartCardMeta", key: "m" },
@@ -310,26 +373,42 @@ window.__ModuleLoader__.load({
 						onClick: () => restart.cancel()
 					}, "停止等待")
 				));
-				return react.createElement("div", { className: "kitaRestartCard", role: "status", "aria-live": "polite" }, rows);
+			} else {
+				role = "alert";
+				aria = {};
+				rows.push(react.createElement("div", { className: "kitaRestartCardTitle", key: "t" }, "重启未能完成"));
+				rows.push(react.createElement("div", { className: "kitaRestartCardError", key: "e" }, snapshot.error === null ? "未知错误" : snapshot.error));
+				rows.push(react.createElement("div", { className: "kitaRestartCardRow", key: "r" }, [
+					react.createElement("button", {
+						key: "retry",
+						type: "button",
+						className: "kitaRestartAction",
+						onClick: () => restart.retry()
+					}, "返回"),
+					react.createElement("button", {
+						key: "reload",
+						type: "button",
+						className: "kitaRestartAction kitaRestartAction_primary",
+						onClick: () => restart.reload()
+					}, "重新加载页面")
+				]));
 			}
 
-			rows.push(react.createElement("div", { className: "kitaRestartCardTitle", key: "t" }, "重启未能完成"));
-			rows.push(react.createElement("div", { className: "kitaRestartCardError", key: "e" }, snapshot.error === null ? "未知错误" : snapshot.error));
-			rows.push(react.createElement("div", { className: "kitaRestartCardRow", key: "r" }, [
-				react.createElement("button", {
-					key: "retry",
-					type: "button",
-					className: "kitaRestartAction",
-					onClick: () => restart.retry()
-				}, "返回"),
-				react.createElement("button", {
-					key: "reload",
-					type: "button",
-					className: "kitaRestartAction kitaRestartAction_primary",
-					onClick: () => restart.reload()
-				}, "重新加载页面")
-			]));
-			return react.createElement("div", { className: "kitaRestartCard", role: "alert" }, rows);
+			// Centering is the flex layer's job; the mask is a sibling so the card never
+			// has to stop event propagation.
+			return react.createElement("div", { className: "kitaRestartOverlay" + (leaving ? " kitaRestartLeave" : "") }, [
+				react.createElement("div", {
+					key: "mask",
+					className: "kitaRestartMask",
+					"aria-hidden": "true",
+					onClick: () => restart.cancel()
+				}),
+				react.createElement("div", Object.assign({
+					key: "card:" + shownPhase,
+					className: "kitaRestartCard",
+					role: role
+				}, aria), rows)
+			]);
 		}
 
 		const inject = ["slots"];

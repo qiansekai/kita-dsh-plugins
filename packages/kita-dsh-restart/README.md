@@ -17,7 +17,7 @@ Object 随任务终结被杀」是同一机制；实测 `IsProcessInJob(dsh) => 
 | 文件 | 职责 |
 |---|---|
 | `lib/index.js` | host：注册 `/kita-restart/{run,status}`、幂等注册计划任务、触发 `/Run` |
-| `lib/client.js` | client：`sidebar.footer.action` 按钮 + `shell.overlay` 确认/进度卡 |
+| `lib/client.js` | client：`sidebar.footer.action` 按钮 + `shell.overlay` **屏幕居中**确认/进度模态（遮罩点击或 Esc 取消；入场/出场动画，遵循 `prefers-reduced-motion`） |
 | `scripts/restart-dsh.ps1` | 计划任务动作：延迟 → 调部署自带的 `start.ps1` |
 
 `restart-dsh.ps1` **不重复实现**停旧起新：它调部署自己的 `start.ps1`（停占用端口的实例、清
@@ -82,6 +82,20 @@ monorepo 与 `<home>\profiles\web\plugins-src\kita-dsh-restart`。
 | `ensureTask` | true | apply 时确保任务存在且未漂移 |
 | `requestCooldownMs` | 60000 | 重复请求冷却窗口 |
 | `fallbackSpawn` | true | 任务启动失败时改用直接子进程（不保证活过 kill） |
+
+## 本地验证
+
+client 半是手写 bundle，没有构建、没有类型检查 —— 选择器写错或 CSS 片段拼接坏掉只会在浏览器里
+**静默失效**（不报错、不失败，只是样式不对）。离线冒烟脚本用真实 React 渲染侧栏按钮与弹窗
+（`confirm` / `restarting` / `failed` / `idle` 四个 phase），并捕获 bundle 注入的样式文本逐条断言：
+
+```
+node scripts/smoke-client.cjs lib/client.js "<dsh web profile 目录>"
+```
+
+`<dsh web profile 目录>` 指含 `node_modules/react` 的那个 web profile（本机生产环境由
+`Archive\dsh-envs\active-env.txt` 指针决定，profile 在 `<环境目录>\home\profiles\web`）。
+全部断言通过时退出码为 0。
 
 ## 诊断
 

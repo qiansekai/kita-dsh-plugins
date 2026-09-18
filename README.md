@@ -12,7 +12,7 @@
 | [`packages/kita-mobile-panel`](packages/kita-mobile-panel) | kita-mobile-panel | 移动端面板的 host 桥：受限 git 桥 `/mobile-git/run`（动词 + flag 双重白名单、输出上限、硬超时）。终端与文件路由已于 0.2.0 删除 —— 0.1.6 官方侧栏已自带终端与工作区文件浏览 | host |
 | [`packages/kita-session-title-auto`](packages/kita-session-title-auto) | kita-session-title-auto | all-prompts 会话标题自动重拟（旁路小模型，不碰主循环前缀缓存）+ 钉住工具 + 标题旁 ✨/📌 标记 | host + client |
 | [`packages/kita-reconnect-on-visible`](packages/kita-reconnect-on-visible) | kita-reconnect-on-visible | 标签页/手机回到前台后自动点掉终端的「连接异常」横幅，免手动重连 | client |
-| [`packages/kita-dsh-restart`](packages/kita-dsh-restart) | kita-dsh-restart | 侧栏底部一键重启 dsh web：确认卡 → 按需计划任务（位于 dsh 进程树与 Job Object 之外，故能活过它自己执行的 kill）→ 轮询 bootId → 自动重载页面 | host + client |
+| [`packages/kita-dsh-restart`](packages/kita-dsh-restart) | kita-dsh-restart | 侧栏底部一键重启 dsh web：屏幕居中确认模态（遮罩/Esc 可取消）→ 按需计划任务（位于 dsh 进程树与 Job Object 之外，故能活过它自己执行的 kill）→ 轮询 bootId → 自动重载页面 | host + client |
 | [`packages/kita-workspace-ui`](packages/kita-workspace-ui) | kita-workspace-ui | 官方 ui-workspace fork：会话行内 rename/fork/archive 按钮 + 双击改名 + 完整标题 | client |
 | [`packages/kita-office-preview`](packages/kita-office-preview) | kita-office-preview | 右侧栏 Office 文件预览：Word / Excel / PowerPoint（docx / xlsx / pptx），用官方 `documentPreviews` 扩展点认领官方硬编码为「不可预览」的这批后缀 | client |
 | [`packages/dsh-quota-retry`](packages/dsh-quota-retry) | @dsh-external/dsh-quota-retry | 额度不足（QUOTA）无界长退避 + 鉴权失败（AUTH）有界短退避的自动重试 | host |
