@@ -2378,6 +2378,9 @@ var qrcode = function() {
 			".kitaPair_err{color:#e5534b;font-size:12px;line-height:1.55;white-space:pre-wrap}",
 			".kitaPair_warn{color:#e0a03a;font-size:12px;line-height:1.55}",
 			".kitaPair_note{font-size:12px;opacity:.7;word-break:break-all}",
+			".kitaPair_candName{display:block;font-family:inherit;font-size:11px;opacity:.55;margin-top:3px}",
+			".kitaPair_tagVirtual{border-color:rgba(170,140,60,.55);color:#c9a227}",
+			".kitaPair_tagSelf{border-color:rgba(90,140,220,.55);color:#7aa7ff}",
 		].join("");
 		const styleTagId = "kita-dsh-gateway/pair-panel.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(styleTagId) + "]") === null) {
@@ -2495,7 +2498,11 @@ var qrcode = function() {
 			const canControl = data.canControl === true;
 			const locked = busy !== "" || !canControl;
 			const lockedNote = canControl ? null : react.createElement("span", { className: "kitaPair_note" }, "仅本机页面可开关隧道");
-			const rows = [react.createElement("div", { className: "kitaPair_head", key: "h" }, "远程访问 · Cloudflare 隧道")];
+			// The transport is what tells a network that drops QUIC (Error 1033) apart
+			// from a broken tunnel, and `state()` has always reported it.
+			const protocol = typeof tunnel.protocol === "string" && tunnel.protocol !== "" ? tunnel.protocol : "auto";
+			const rows = [react.createElement("div", { className: "kitaPair_head", key: "h" },
+				"远程访问 · Cloudflare 隧道（传输 " + protocol + "）")];
 			if (tunnel.available !== true) {
 				rows.push(react.createElement("div", { className: "kitaPair_hint", key: "na" },
 					"未找到 cloudflared：在插件配置里设置 cloudflaredPath，或设置 CLOUDFLARED_PATH 环境变量后重载插件。"));
@@ -2567,11 +2574,18 @@ var qrcode = function() {
 			const [view, setView] = react.useState({ loading: true, data: null, error: "" });
 			const [busy, setBusy] = react.useState("");
 			const [note, setNote] = react.useState("");
+			// Which destructive button is armed for a second tap. One stray tap on a
+			// phone must not revoke the device you are holding.
+			const [arming, setArming] = react.useState("");
 			const [, setClock] = react.useState(0);
 
 			react.useEffect(() => {
 				let alive = true;
 				const tick = () => {
+					// This panel usually sits open on a phone. Polling a hidden tab every
+					// five seconds is pure battery drain, so skip it until it is visible
+					// again (the visibilitychange handler below refreshes immediately).
+					if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
 					loadState().then((next) => {
 						if (alive) setView({ loading: false, data: next, error: "" });
 					}).catch((error) => {
@@ -2586,12 +2600,21 @@ var qrcode = function() {
 				tick();
 				const poll = setInterval(tick, 5000);
 				const clock = setInterval(() => { if (alive) setClock((n) => n + 1); }, 1000);
+				const onVisible = () => { if (document.visibilityState === "visible") tick(); };
+				if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisible);
 				return () => {
 					alive = false;
 					clearInterval(poll);
 					clearInterval(clock);
+					if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisible);
 				};
 			}, []);
+			// Disarm a destructive button after a few seconds of inaction.
+			react.useEffect(() => {
+				if (arming === "") return undefined;
+				const timer = setTimeout(() => setArming(""), 4000);
+				return () => clearTimeout(timer);
+			}, [arming]);
 
 			const copyText = (text) => {
 				const fallback = () => setNote("复制失败，请手动选中后复制");
@@ -2646,17 +2669,27 @@ var qrcode = function() {
 					react.createElement("div", { className: "kitaPair_head" }, "当前配对码"),
 					data.code !== ""
 						? react.createElement("div", { className: "kitaPair_code" }, data.code)
-						: react.createElement("div", { className: "kitaPair_hint" }, "未读到配对码"),
+						: react.createElement("div", { className: "kitaPair_hint" },
+							data.codeLocalOnly === true
+								? "配对码只在本机显示。请到电脑上打开本页读取，或让电脑屏幕上的二维码被手机扫描。"
+								: "未读到配对码"),
 					left !== "" ? react.createElement("div", { className: "kitaPair_count" }, "剩余 " + left + " 轮换") : null,
 					react.createElement("div", { className: "kitaPair_actions" },
-						react.createElement("button", {
+						data.code !== "" ? react.createElement("button", {
 							className: "kitaPair_btn", type: "button",
 							onClick: () => copyText(String(data.code)),
-						}, "复制配对码"),
+						}, "复制配对码") : null,
+						data.canControl === true ? react.createElement("button", {
+							className: "kitaPair_btn kitaPair_btnSm", type: "button",
+							disabled: busy !== "",
+							onClick: () => act("rotate", undefined, "已换新的一组配对码"),
+						}, busy === "rotate" ? "正在换码…" : "立即换码") : null,
 					),
 					react.createElement("div", { className: "kitaPair_hint" },
-						"手机扫右侧二维码即自动配对（码就在二维码里，随轮换自动更新）；"
-						+ "也可以打开下方地址手动输入这 6 位数字。配对后签发 90 天凭据。"),
+						data.canControl === true
+							? "手机扫右侧二维码即自动配对（码就在二维码里，随轮换自动更新）；"
+								+ "也可以打开下方地址手动输入这 6 位数字。配对后签发 90 天凭据。"
+							: "本设备已配对。配对码只在本机显示——要再配一台设备，请到电脑上打开本页扫码。"),
 				);
 
 				const qrBox = qr === null ? null : react.createElement("div", { className: "kitaPair_qrBox", key: "qr" },
@@ -2673,14 +2706,22 @@ var qrcode = function() {
 					react.createElement("div", { className: "kitaPair_top" }, codeCol, qrBox),
 				));
 
-				const candRows = candidates.map((ip, index) => {
-					const url = "http://" + ip + ":" + data.port;
+				// Every candidate carries its adapter name now: a machine with VMware /
+				// VirtualBox / hotspot adapters offers several addresses that all look
+				// usable, and the name is the only thing that tells them apart.
+				const candRows = candidates.map((entry, index) => {
+					const ip = typeof entry === "string" ? entry : String((entry && entry.ip) || "");
+					const adapters = typeof entry === "object" && entry !== null ? String(entry.name || "") : "";
+					const virtualAdapter = typeof entry === "object" && entry !== null && entry.virtual === true;
+					const url = ip === "" ? "" : "http://" + ip + ":" + data.port;
 					return react.createElement("div", {
 						className: "kitaPair_cand" + (index === 0 ? " kitaPair_candFirst" : ""),
-						key: ip,
+						key: ip === "" ? String(index) : ip,
 					},
 						index === 0 ? react.createElement("span", { className: "kitaPair_tag" }, "建议") : null,
-						react.createElement("span", { className: "kitaPair_candUrl" }, url),
+						virtualAdapter ? react.createElement("span", { className: "kitaPair_tag kitaPair_tagVirtual" }, "虚拟网卡") : null,
+						react.createElement("span", { className: "kitaPair_candUrl" }, url,
+							adapters === "" ? null : react.createElement("span", { className: "kitaPair_candName" }, adapters)),
 						react.createElement("button", {
 							className: "kitaPair_btn kitaPair_btnSm", type: "button",
 							onClick: () => copyText(url),
@@ -2723,25 +2764,38 @@ var qrcode = function() {
 
 				const devices = Array.isArray(data.devices) ? data.devices : [];
 				const rows = devices.map((device, index) => {
+					const self = typeof data.selfId === "string" && data.selfId !== "" && device.id === data.selfId;
 					const meta = [];
 					if (device.at > 0) meta.push("配对于 " + formatTime(device.at) + "（" + relativeTime(device.at) + "）");
 					const ipText = device.lastIp !== "" ? device.lastIp : device.ip;
 					if (ipText !== "") meta.push("来自 " + ipText);
 					if (device.lastActive > 0) meta.push("最近活跃 " + relativeTime(device.lastActive));
+					if (device.expiresAt > 0) {
+						const days = Math.max(0, Math.round((device.expiresAt - Date.now()) / 86400000));
+						meta.push("有效至 " + formatTime(device.expiresAt).slice(0, 10) + "（剩 " + String(days) + " 天）");
+					}
+					const armed = arming === device.id;
 					return react.createElement("div", {
 						className: "kitaPair_dev" + (index === 0 ? " kitaPair_devFirst" : ""),
-						key: device.token !== "" ? device.token : String(index),
+						key: device.id !== "" ? device.id : String(index),
 					},
 						react.createElement("div", { className: "kitaPair_devMain" },
-							react.createElement("div", { className: "kitaPair_devName" }, uaLabel(device.ua)),
+							react.createElement("div", { className: "kitaPair_devName" },
+								uaLabel(device.ua),
+								self ? react.createElement("span", { className: "kitaPair_tag kitaPair_tagSelf" }, "本设备") : null),
 							react.createElement("div", { className: "kitaPair_devMeta", title: device.ua },
 								meta.length > 0 ? meta.join(" · ") : "无记录"),
 						),
-						device.token !== "" ? react.createElement("button", {
-							className: "kitaPair_btn kitaPair_btnSm kitaPair_btnDanger", type: "button",
+						device.id !== "" ? react.createElement("button", {
+							className: "kitaPair_btn kitaPair_btnSm" + (armed ? " kitaPair_btnDanger" : ""),
+							type: "button",
 							disabled: busy !== "",
-							onClick: () => act("revoke", device.token, "已吊销该设备"),
-						}, "吊销") : null,
+							onClick: () => {
+								if (!armed) { setArming(device.id); return; }
+								setArming("");
+								act("revoke", device.id, self ? "已吊销本设备，这台设备需要重新配对" : "已吊销该设备");
+							},
+						}, armed ? "确认吊销" : "吊销") : null,
 					);
 				});
 
@@ -2754,6 +2808,16 @@ var qrcode = function() {
 							className: "kitaPair_btn kitaPair_btnSm", type: "button",
 							onClick: () => { setNote(""); refresh(); },
 						}, "刷新"),
+						devices.length > 0 ? react.createElement("button", {
+							className: "kitaPair_btn kitaPair_btnSm" + (arming === "__all__" ? " kitaPair_btnDanger" : ""),
+							type: "button",
+							disabled: busy !== "",
+							onClick: () => {
+								if (arming !== "__all__") { setArming("__all__"); return; }
+								setArming("");
+								act("revoke-all", data.selfId, "已吊销其余设备");
+							},
+						}, arming === "__all__" ? "确认全部吊销" : "吊销其余设备") : null,
 						react.createElement("span", { className: "kitaPair_note" }, "每 5 秒自动刷新"),
 					),
 				));

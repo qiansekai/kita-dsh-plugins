@@ -58,6 +58,29 @@ dsh 看到的是本地客户端（loopback 围栏通过、本地专属功能可�
 局域网访客与隧道访客拿到的是纯输入框（否则任何能打开该页的人都能读到配对码，等于绕过整个鉴权）。
 `/admin` 整段路径同样 loopback-only。
 
+WebUI「配对」页签走同一把尺子：`GET /kita-gateway/panel` 只在本机来源（`entry === local`）返回
+`code` / `localPairUrl` / `tunnel.pairUrl`，手机与隧道访客拿到的是空码 + `codeLocalOnly: true` 与一段说明。
+**已配对设备不能从自己屏幕上读走配对码** —— 那是把 90 天凭据再分发出去的唯一入口。
+2026-09-20 修复的正是这一条：此前该路由无条件返回配对码，一个已配对手机打开页签即可看到 `[MEASURED]`。
+
+配对页本身也会识别身份：带着有效 cookie 打开 `/gateway-pair` 时显示「这台设备已经配对过了」+ 进入 dsh，
+而不是再让你输一遍码。
+
+## 手机该连哪个地址
+
+主机常有多张网卡（本机实测 12 张，其中 5 张是虚拟的）。候选地址按「物理网卡优先 → 与最近活跃设备同 /24 →
+网段」排序，**每条都带网卡名**，虚拟网卡另外挂「虚拟网卡」标记：
+
+| 排序因素 | 说明 |
+|---|---|
+| 物理 / 虚拟 | VMware、VirtualBox、Hyper-V、Radmin、Tailscale、蓝牙、`本地连接*`（Wi-Fi Direct / 移动热点）一律判为虚拟，排在**所有**物理网卡之后 |
+| 同 /24 | 与最近活跃设备同网段的候选 +200 分 —— 手机的所在网段就是那一个 |
+| 网段 | 192.168/16 (+60) > 10/8 (+40) > 172.16/12 (+15) > 其余 (+5)；VirtualBox host-only 另有 −50 |
+
+**2026-09-20 的修复动机** `[MEASURED]`：修复前只按网段排序，于是 `VMnet8 (192.168.159.1)` 被标成「建议」排第一，
+而唯一手机能连的 `WLAN (10.60.139.207)` 排在最后 —— 用户照「建议」连必然失败。虚拟网卡不会被丢弃
+（手机可能真的在热点或 VPN 网段里），只是永远排在物理网卡之后。
+
 ## 一键 Cloudflare 隧道
 
 面板上的「一键开启 CF 隧道」按钮（`POST /kita-gateway/panel { "action": "tunnel-start" }`）会拉起
@@ -88,14 +111,23 @@ dsh 看到的是本地客户端（loopback 围栏通过、本地专属功能可�
 同一个包带一个 client 半（`lib/client.js`，由 `package.json` 的 `dsh.client` 声明进 Web 模块图），
 在会话页签行 `conversation.view` 的 order 30 注册「配对」页 —— 排在移动端插件的 git 页之后。
 
-页面内容：当前配对码（大字 + 剩余轮换倒计时）、扫码即配对的二维码、
-按「与手机最近来源同 /24」优先排序的本机访问地址候选（排除回环 / 链路本地 / Radmin / CGNAT 段）、
-**远程访问（CF 隧道）卡片**、已配对设备列表（UA 摘要、来源 IP、配对时间、最近活跃）与逐设备吊销；
+页面内容：当前配对码（大字 + 剩余轮换倒计时 + 「立即换码」）、扫码即配对的二维码、
+带网卡名的本机访问地址候选（排序见上节）、**远程访问（CF 隧道）卡片**（含实际使用的传输协议）、
+已配对设备列表（UA 摘要、来源 IP、配对时间、最近活跃、凭据到期时间）与逐设备吊销；
 熔断时额外出现解锁按钮。
 
+**本机专属**：配对码与两个含码 URL、以及「立即换码」「开关隧道」，只有 `entry === local` 才拿得到；
+手机端看到的是说明文字，按钮为禁用状态。
+
+**设备行给的是句柄，不是凭据**：`id = sha256(token)` 的前 16 位（`lib/token-store.js` 的 `deviceId()`），
+浏览器全程拿不到 token 本身；吊销按句柄由 host 反查。手机看自己那一行会标「本设备」，
+且「吊销其余设备」会保留它，避免误操作把自己踢下线；单个吊销是两步确认（再点一次才执行）。
+
 数据来自 host 半在 dsh webserver 上注册的精确路由 `GET /kita-gateway/panel`；
-写操作走同一路由的 `POST { "action": "revoke" | "unlock" | "tunnel-start" | "tunnel-stop" }`。
+写操作走同一路由的 `POST { "action": "revoke" | "revoke-all" | "rotate" | "unlock" | "tunnel-start" | "tunnel-stop" }`。
 用相对路径调用，桌面页面（loopback 端口）与经网关反代的手机页面（gateway 端口）都能直接命中。
+网关反代时只在 `/kita-gateway/` 这条路径上注入 `x-kita-gw-device`（不可逆句柄），
+并在注入前剥掉客户端自带的同名头，所以 LAN 客户端无法冒名。
 
 **认证围栏**：优先用 `connection.requestRejection`（Host/Origin 围栏 + 浏览器会话 cookie）；
 当该服务在当前上下文不可见时（2026-09 生产启动顺序即如此），**内置围栏接管而不是跳过** ——
@@ -113,20 +145,25 @@ host 侧（`lib/qr.js`，用于配对页与管理页的服务端渲染）与 cli
 
 ## 配对流程
 
-1. 启动 dsh 后控制台打印一次性配对码；
+1. 启动 dsh 后控制台打印一次性配对码 —— dsh 常由隐藏窗口的启动器拉起，看不到终端时改到 dsh 页面的「配对」页签
+   或 `http://127.0.0.1:3081/admin` 读取；
 2. 手机浏览器打开 `http://<主机LAN-IP>:3081`（或扫二维码直达并自动配对）；
-3. 签发 90 天 token（`<DSH_HOME>/storages/kita-dsh-gateway-tokens.json`，只落哈希）；
-4. 后续访问免配对，直到 token 过期或主机吊销/删除存储文件。
+3. 签发 90 天 token，**只把 `sha256(token)` 落到** `<DSH_HOME>/storages/kita-dsh-gateway-tokens.json`；
+4. 后续访问免配对，直到 token 过期（在每次请求上判定）、主机吊销，或存储文件被删。
 
 不在同一 Wi-Fi 时：在电脑面板上点「一键开启 CF 隧道」，用公网二维码扫码即可。
 
 ## 防护措施
 
-- 配对码随机生成、限时（`codeMinutes`）、单窗口最多 5 次尝试；
-- 失败突刺阶梯锁 IP：5 分钟 → 30 分钟 → 6 小时 → 24 小时 → 永久（至进程重启）；
+- 配对码随机生成、限时（`codeMinutes`）；轮换时旧码保留 60 秒宽限（`CODE_GRACE_MS`），扫码撞上轮换不会被判错码；
+- 单窗口最多 5 次尝试，失败会回传剩余次数；失败突刺阶梯锁 IP：5 分钟 → 30 分钟 → 6 小时 → 24 小时 → 永久（至进程重启）；
 - 全局熔断：一小时 300 次失败直接关闭配对直至重启；
-- token 比较走 `timingSafeEqual`（哈希后），存储只落哈希；
-- 配对码只在本机渲染（见上「扫码即配对」），隧道开关仅本机可操作。
+- 设备凭据**只落 `sha256` 哈希**（`lib/token-store.js`），认证时把 cookie 哈希后比对；`timingSafeEqual` 用于配对码比较；
+- 面板与 `/admin` 只拿到 16 位不可逆句柄，吊销按句柄反查，浏览器全程接触不到 token；
+- 90 天 TTL 在**每次请求**上判定（不再只在启动时过滤一次），另有每小时一次的后台清理；
+- 状态文件**原子写**（临时文件 + rename）：半截写入不会让全部设备静默登出、配对码也不会无故重置；
+- `x-kita-gw-device` 由网关在 `/kita-gateway/` 路径上注入并先剥离同名入站头，LAN 客户端无法冒名；
+- 配对码只在本机渲染（见上「扫码即配对」），隧道开关与「立即换码」仅本机可操作。
 
 ## 安全警告
 
@@ -150,14 +187,30 @@ host 侧（`lib/qr.js`，用于配对页与管理页的服务端渲染）与 cli
   使 `fetch` 报 `UND_ERR_CONNECT_TIMEOUT`，而 `curl --resolve` / 公共 DoH 立刻可用 ——
   探针因此内置 DoH + IPv4 直连回退（`KITA_E2E_DOH`，默认阿里 DoH）。
 
+## 实测记录（2026-09-20）
+
+均为本机实测 `[MEASURED]`：
+
+- **面板不再泄露配对码**：从 LAN 入口（`entry=lan`）请求 `/kita-gateway/panel`，修复前 `code` 为 6 位明文，
+  修复后为 `''` + `codeLocalOnly: true`；桌面入口仍正常返回。
+- **候选地址排序**：修复前 `candidates = [VMnet8, VMnet1, VMnet1, 热点, WLAN]`（「建议」挂在 VMnet8 上），
+  修复后 `[WLAN(物理), VMnet8, VMnet1, VMnet1, 热点, VirtualBox]` —— 物理网卡恒在最前。
+- **凭据存储**：`kita-dsh-gateway-tokens.json` 的键由 64 位明文 token 变为 `sha256` 十六进制，
+  已配对设备无需重新配对（cookie 里的明文 token 哈希后照样命中）。
+- **离线回归**：`verify-gateway.mjs` 91 项 + `smoke-gateway.mjs` 40 项全绿。
+
 ## 测试
 
 ```bash
-node scripts/verify-gateway.mjs        # 离线：59 项（纯函数、二维码、隧道状态机，含真实子进程）
-node scripts/pair-tunnel-e2e.mjs       # 在线：29 项（配对页可见性、配对流程、隧道权限）
+node scripts/verify-gateway.mjs        # 离线：91 项（纯函数、二维码、隧道状态机、凭据存储与 v1 迁移）
+node scripts/smoke-gateway.mjs         # 离线：40 项（真实监听 + 假 webserver：配对流程、entry 围栏、迁移、宽限期）
+node scripts/pair-tunnel-e2e.mjs       # 在线：配对页可见性、配对流程、entry 围栏、隧道权限
 KITA_E2E_TUNNEL=1 node scripts/pair-tunnel-e2e.mjs   # 额外真实开停一次隧道
 node scripts/sync-qr-encoder.mjs --check             # host 与 client 二维码库同源校验
 ```
+
+`smoke-gateway.mjs` 用私有端口（13080/13081）与临时 `DSH_HOME` 跑真实插件，不碰在役网关；
+它需要 `@deepseek-ai/schemastery` 能从本包解析（monorepo 从 dsh 环境链接，`npm install` 亦可）。
 
 在线脚本读取 `KITA_GW_PORT` / `KITA_DSH_PORT` / `KITA_LAN_IP`（默认 3081 / 3080 / 自动探测），
 不写死任何本机地址；它会**只**撤销本次新建的配对设备，并保持运行前已存在的隧道与设备原样。

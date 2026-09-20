@@ -1,6 +1,8 @@
 // Adversarial test battery against the dsh gateway through the Cloudflare
 // Tunnel — attacker perspective (no cookie), plus remote-capability checks
 // with a legitimately paired token. Run AFTER the normal e2e pair flow.
+import { deviceId } from '../lib/token-store.js'
+
 const TUNNEL = process.argv[2] ?? 'https://ladder-slow-motorola-adam.trycloudflare.com'
 const LOCAL = 'http://127.0.0.1:3081'
 
@@ -85,7 +87,7 @@ async function main() {
 
   // 10. 吊销测试 token
   const revoke = await fetch(`${LOCAL}/admin/revoke`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: deviceId(token) }),
   })
   check('测试 token 吊销', revoke.status === 200 && (await j(revoke))?.ok === true, `HTTP ${revoke.status}`)
   const afterRevoke = await fetch(`${TUNNEL}/`, { headers: { Cookie: `kita_gw=${token}` } })

@@ -10,7 +10,7 @@
 
 import { spawn, spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -26,10 +26,22 @@ import {
   ipPrefix,
   isLoopbackAddress,
   isUsableIp,
+  isVirtualInterface,
   localCandidates,
   pairUrl,
 } from '../lib/pair-util.js'
 import { qrMatrix, qrSvg } from '../lib/qr.js'
+import {
+  STORE_VERSION,
+  TOKEN_TTL_MS,
+  deviceId,
+  expiresAt,
+  hashToken,
+  isExpired,
+  loadStore,
+  pruneExpired,
+  saveStore,
+} from '../lib/token-store.js'
 import { TUNNEL_URL_PATTERN, createTunnel, resolveCloudflared } from '../lib/tunnel.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -73,8 +85,32 @@ const fakeInterfaces = {
   ],
   'Loopback': [{ family: 'IPv4', internal: true, address: '127.0.0.1' }],
 }
-equal('localCandidates prefers the phone\'s /24', localCandidates(['192.168.1.77'], fakeInterfaces)[0], '192.168.1.42')
-check('localCandidates drops loopback/VirtualBox preference', !localCandidates([], fakeInterfaces).includes('127.0.0.1'))
+equal('localCandidates prefers the phone\'s /24',
+  localCandidates(['192.168.1.77'], fakeInterfaces)[0].ip, '192.168.1.42')
+check('localCandidates drops loopback entirely',
+  !localCandidates([], fakeInterfaces).some((entry) => entry.ip === '127.0.0.1'))
+equal('localCandidates names the adapter', localCandidates([], fakeInterfaces)[0].name, 'Wi-Fi')
+
+// The measured failure this guards: with only the subnet heuristic, VMnet8 was
+// ranked first ("建议") and the WLAN address — the only one a phone could
+// reach — came last. The adapter name is the only thing that distinguishes
+// them, because they all sit in 192.168/16.
+const mixedInterfaces = {
+  'VMware Network Adapter VMnet8': [{ family: 'IPv4', internal: false, address: '192.168.159.1' }],
+  'WLAN': [{ family: 'IPv4', internal: false, address: '10.60.139.207' }],
+  '本地连接* 10': [{ family: 'IPv4', internal: false, address: '192.168.137.1' }],
+}
+const mixed = localCandidates([], mixedInterfaces)
+equal('a physical adapter outranks every virtual one', mixed[0].ip, '10.60.139.207')
+check('a virtual adapter is still listed, flagged',
+  mixed.some((entry) => entry.ip === '192.168.137.1' && entry.virtual === true))
+check('vmware adapters are flagged virtual',
+  mixed.find((entry) => entry.ip === '192.168.159.1').virtual === true)
+check('a phone\'s /24 cannot promote a virtual adapter above a physical one',
+  localCandidates(['192.168.159.9'], mixedInterfaces)[0].ip === '10.60.139.207')
+equal('isVirtualInterface flags the hotspot form', isVirtualInterface('本地连接* 10'), true)
+equal('isVirtualInterface leaves a real adapter alone', isVirtualInterface('以太网'), false)
+equal('isVirtualInterface leaves WLAN alone', isVirtualInterface('WLAN'), false)
 
 equal('pairUrl carries the code in the fragment', pairUrl('http://192.168.1.42:3081', '123456'),
   'http://192.168.1.42:3081/gateway-pair#k=123456')
@@ -294,6 +330,62 @@ console.log('\n[6] tunnel controller against a real process')
   await tunnel.stop()
   rmSync(script, { force: true })
   equal('real process: stopped', tunnel.state().phase, 'stopped')
+}
+
+// ---------------------------------------------------------------------------
+// The credential store. What this guards: the raw token must never reach the
+// disk (a copy of the file would otherwise be a working credential), a v1 file
+// must keep every paired device working across the upgrade, and a torn write
+// must not silently log everyone out.
+console.log('\n[7] credential store')
+{
+  const storeTmp = mkdtempSync(join(tmpdir(), 'kita-gw-store-'))
+  try {
+    const file = join(storeTmp, 'tokens.json')
+    const token = 'a'.repeat(64)
+    const meta = { ua: 'test agent', at: Date.now(), ip: '10.0.0.2', lastActive: Date.now() }
+    const tokens = new Map([[hashToken(token), meta]])
+
+    equal('saveStore reports success', saveStore(file, tokens, '123456'), true)
+    const raw = JSON.parse(readFileSync(file, 'utf8'))
+    equal('the store is versioned', raw.version, STORE_VERSION)
+    equal('the hash is the key on disk', Object.keys(raw.tokens), [hashToken(token)])
+    check('the raw token is not on disk', JSON.stringify(raw).includes(token) === false)
+
+    const loaded = loadStore(file)
+    equal('a v2 store loads unchanged', loaded.tokens.has(hashToken(token)), true)
+    equal('a v2 store is not marked migrated', loaded.migrated, false)
+    equal('the pairing code round-trips', loaded.currentCode, '123456')
+    equal('deviceId is the hash prefix', deviceId(token), hashToken(token).slice(0, 16))
+
+    // v1: the map was keyed by the raw token. A phone paired before the upgrade
+    // still sends that raw token as its cookie, so hashing on load is what keeps
+    // it working.
+    writeFileSync(file, JSON.stringify({ currentCode: '654321', tokens: { [token]: meta } }))
+    const v1 = loadStore(file)
+    equal('a v1 store is marked migrated', v1.migrated, true)
+    equal('a v1 raw key is hashed on load', v1.tokens.has(hashToken(token)), true)
+    equal('the raw key is gone after migration', v1.tokens.has(token), false)
+    equal('v1 keeps its pairing code', v1.currentCode, '654321')
+
+    const stale = { ...meta, at: Date.now() - TOKEN_TTL_MS - 1000 }
+    writeFileSync(file, JSON.stringify({ version: STORE_VERSION, tokens: { [hashToken(token)]: stale } }))
+    equal('an expired token is dropped on load', loadStore(file).tokens.size, 0)
+    const live = new Map([[hashToken(token), stale]])
+    equal('pruneExpired removes expired entries', pruneExpired(live), 1)
+    equal('pruneExpired empties the map', live.size, 0)
+    check('isExpired leaves a token inside its window', isExpired({ at: Date.now() - TOKEN_TTL_MS + 60000 }) === false)
+    equal('expiresAt is issued-at plus the TTL', expiresAt({ at: 1000 }), 1000 + TOKEN_TTL_MS)
+    check('a token with no issue date is treated as expired', isExpired({}) === true)
+
+    // A torn write leaves a stray .tmp behind; the store itself must still load.
+    writeFileSync(file + '.tmp', '{ not json at all')
+    equal('a stray .tmp does not break loading', loadStore(file).tokens.size, 0)
+    const missing = loadStore(join(storeTmp, 'absent.json'))
+    check('a missing store loads empty instead of throwing', missing.tokens.size === 0 && missing.migrated === false)
+  } finally {
+    rmSync(storeTmp, { recursive: true, force: true })
+  }
 }
 
 // ---------------------------------------------------------------------------

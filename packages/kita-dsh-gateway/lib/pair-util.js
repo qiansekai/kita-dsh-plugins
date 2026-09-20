@@ -20,6 +20,14 @@ import os from 'node:os'
  */
 export const ENTRY_HEADER = 'x-kita-gw-entry'
 
+/**
+ * Header the gateway stamps with the *handle* of the calling device when it
+ * proxies a panel request, so the panel can mark "this device" and refuse to
+ * revoke it by accident. It carries `deviceId()`, never a token, and the
+ * gateway strips any client-supplied copy before stamping its own.
+ */
+export const DEVICE_HEADER = 'x-kita-gw-device'
+
 /** Entry points a request can arrive through, most trusted first. */
 export const ENTRY_LOCAL = 'local'
 export const ENTRY_LAN = 'lan'
@@ -63,6 +71,45 @@ export function ipPrefix(ip) {
   return parts.length === 4 ? `${parts[0]}.${parts[1]}.${parts[2]}.` : ''
 }
 
+/**
+ * Adapter names that cannot be the phone's door: virtual switches, host-only
+ * adapters, VPN tunnels, and the Wi-Fi Direct / mobile-hotspot adapters Windows
+ * names `本地连接* N`.
+ *
+ * The name is what has to decide this, because the address cannot: VMware's
+ * VMnet1/VMnet8, VirtualBox's host-only switch and Windows' mobile hotspot all
+ * sit in 192.168/16 — exactly where a home router lives too. Measured
+ * 2026-09-20 on this machine: five of twelve adapters are virtual, and the
+ * plain address ranking put VMnet8 first ("建议") while the only address a
+ * phone could actually reach, the WLAN one, came last.
+ */
+const VIRTUAL_INTERFACE_PATTERN = new RegExp([
+  'vmware',
+  'virtualbox',
+  'hyper-v',
+  'vethernet',
+  'loopback',
+  'radmin',
+  'tailscale',
+  'zerotier',
+  'wireguard',
+  'openvpn',
+  'tap-',
+  'wsl',
+  'docker',
+  'bluetooth',
+  '蓝牙',
+  'npcap',
+  'nordvpn',
+  'proton',
+  '本地连接\\s*\\*', // Wi-Fi Direct / mobile hotspot adapters
+].join('|'), 'i')
+
+/** True when the adapter behind `name` is virtual, tunneled or a hotspot. */
+export function isVirtualInterface(name) {
+  return VIRTUAL_INTERFACE_PATTERN.test(String(name ?? ''))
+}
+
 /** Same /24 as a recently active device wins; then LAN-looking ranges. */
 export function scoreIp(ip, devicePrefixes) {
   const [a, b] = ip.split('.').map(Number)
@@ -75,11 +122,21 @@ export function scoreIp(ip, devicePrefixes) {
   return score
 }
 
+/** How far below every physical adapter a virtual one is ranked. */
+const VIRTUAL_PENALTY = 1000
+
 /**
  * Local IPv4 candidates for the phone entry URL, best first.
+ *
+ * Each entry carries its adapter name, because a machine with virtual switches
+ * offers several plausible-looking addresses and only the physical
+ * Wi-Fi/Ethernet one can be reached by a phone. Virtual adapters are kept — a
+ * phone may genuinely sit on a hotspot or a VPN subnet — but ranked below
+ * every physical adapter, so "the first one" is always a real door.
+ *
  * @param deviceIps - ips of recently active paired devices.
  * @param interfaces - `os.networkInterfaces()` shape; injectable for tests.
- * @returns at most five addresses.
+ * @returns at most eight `{ ip, name, virtual, score }`, best first.
  */
 export function localCandidates(deviceIps, interfaces = os.networkInterfaces()) {
   const prefixes = []
@@ -89,18 +146,18 @@ export function localCandidates(deviceIps, interfaces = os.networkInterfaces()) 
     if (prefixes.length >= 5) break
   }
   const found = []
-  for (const list of Object.values(interfaces ?? {})) {
+  for (const [name, list] of Object.entries(interfaces ?? {})) {
     for (const info of list ?? []) {
       if (info.family !== 'IPv4' || info.internal) continue
-      if (!isUsableIp(info.address) || found.includes(info.address)) continue
-      found.push(info.address)
+      if (!isUsableIp(info.address)) continue
+      if (found.some((entry) => entry.ip === info.address)) continue
+      found.push({ ip: info.address, name: String(name), virtual: isVirtualInterface(name) })
     }
   }
   return found
-    .map((ip) => ({ ip, score: scoreIp(ip, prefixes) }))
+    .map((entry) => ({ ...entry, score: scoreIp(entry.ip, prefixes) + (entry.virtual ? -VIRTUAL_PENALTY : 0) }))
     .sort((a, b) => b.score - a.score)
-    .slice(0, 5)
-    .map((entry) => entry.ip)
+    .slice(0, 8)
 }
 
 /**

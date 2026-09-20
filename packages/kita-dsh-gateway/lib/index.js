@@ -16,11 +16,12 @@
 import http from 'node:http'
 import net from 'node:net'
 import crypto from 'node:crypto'
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { homedir } from 'node:os'
 import z from '@deepseek-ai/schemastery'
 import {
+  DEVICE_HEADER,
   ENTRY_HEADER,
   ENTRY_LAN,
   ENTRY_LOCAL,
@@ -31,6 +32,16 @@ import {
   pairUrl,
 } from './pair-util.js'
 import { qrSvg } from './qr.js'
+import {
+  TOKEN_TTL_MS,
+  deviceId,
+  expiresAt,
+  hashToken,
+  isExpired,
+  loadStore,
+  pruneExpired,
+  saveStore,
+} from './token-store.js'
 import { createTunnel, resolveCloudflared } from './tunnel.js'
 
 export const name = 'kita-dsh-gateway'
@@ -66,7 +77,6 @@ export const Config = z.object({
 
 const COOKIE_NAME = 'kita_gw'
 const TARGET_HOST = '127.0.0.1'
-const TOKEN_TTL_MS = 90 * 24 * 3600 * 1000 // 90 days
 const MAX_PAIR_ATTEMPTS = 5
 const PAIR_WINDOW_MS = 60 * 1000
 /**
@@ -94,40 +104,12 @@ function storagePath() {
   return join(home, 'storages', 'kita-dsh-gateway-tokens.json')
 }
 
-function loadTokens() {
-  try {
-    if (!existsSync(storagePath())) return new Map()
-    const data = JSON.parse(readFileSync(storagePath(), 'utf8'))
-    const map = new Map()
-    const now = Date.now()
-    for (const [token, meta] of Object.entries(data.tokens ?? {})) {
-      if (meta?.at && now - meta.at < TOKEN_TTL_MS) map.set(token, meta)
-    }
-    return map
-  } catch {
-    return new Map()
-  }
-}
-
-function loadCurrentCode() {
-  try {
-    if (!existsSync(storagePath())) return undefined
-    const data = JSON.parse(readFileSync(storagePath(), 'utf8'))
-    return typeof data.currentCode === 'string' ? data.currentCode : undefined
-  } catch {
-    return undefined
-  }
-}
-
+/**
+ * Persist the store. Every caller funnels through here so the hashed-key shape
+ * and the atomic write stay in one place (`lib/token-store.js`).
+ */
 function saveState(tokens, currentCode) {
-  try {
-    const file = storagePath()
-    mkdirSync(dirname(file), { recursive: true })
-    const data = { currentCode, tokens: Object.fromEntries(tokens) }
-    writeFileSync(file, JSON.stringify(data, null, 2))
-  } catch (error) {
-    console.error('[kita-dsh-gateway] state persist failed:', error)
-  }
+  return saveStore(storagePath(), tokens, currentCode)
 }
 
 function newCode() {
@@ -144,13 +126,26 @@ function parseCookies(header) {
   return out
 }
 
+/**
+ * The token this request carries, or null.
+ *
+ * The cookie / Bearer value is the raw token as issued to the device; the store
+ * is keyed by its hash, so every lookup hashes first. Expiry is evaluated here,
+ * on every request, because a token that only expires when the process restarts
+ * is not a 90-day token at all.
+ */
 function isAuthed(req, tokens) {
   const cookies = parseCookies(req.headers.cookie)
-  if (cookies[COOKIE_NAME] && tokens.has(cookies[COOKIE_NAME])) return cookies[COOKIE_NAME]
+  const cookie = cookies[COOKIE_NAME]
+  if (typeof cookie === 'string' && cookie !== '') {
+    const meta = tokens.get(hashToken(cookie))
+    if (meta !== undefined && !isExpired(meta)) return cookie
+  }
   const auth = req.headers.authorization
   if (typeof auth === 'string' && auth.startsWith('Bearer ')) {
     const token = auth.slice(7).trim()
-    return tokens.has(token) ? token : null
+    const meta = tokens.get(hashToken(token))
+    if (meta !== undefined && !isExpired(meta)) return token
   }
   return null
 }
@@ -204,7 +199,7 @@ function isLoopbackPeer(req) {
   return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1'
 }
 
-function proxyHttp(req, res, targetPort) {
+function proxyHttp(req, res, targetPort, token = '') {
   // Rewrite Host to loopback and strip Origin/Referer/Sec-Fetch-Site: the
   // browser on a LAN origin sends its own Origin, and dsh's loopback fence
   // rejects any request whose Origin host differs from the Host header.
@@ -223,6 +218,10 @@ function proxyHttp(req, res, targetPort) {
   delete headers['cf-connecting-ip']
   headers[ENTRY_HEADER] = viaTunnel ? ENTRY_TUNNEL : ENTRY_LAN
   if (viaTunnel) headers['cf-connecting-ip'] = req.headers['cf-connecting-ip']
+  // Only the panel consumes this, so only the panel hop carries it: the rest
+  // of the webserver keeps seeing exactly the headers it saw before.
+  delete headers[DEVICE_HEADER]
+  if (token !== '') headers[DEVICE_HEADER] = deviceId(token)
   const target = http.request({
     host: TARGET_HOST,
     port: targetPort,
@@ -274,7 +273,7 @@ function proxyWs(req, socket, head, targetPort) {
  * A scanned link carries the code in the fragment and the page submits it on
  * its own, so scanning means being paired — no typing.
  */
-const pairPage = (local) => `<!doctype html>
+const pairPage = (local, paired = false) => `<!doctype html>
 <html lang="zh">
 <head>
 <meta charset="utf-8">
@@ -296,6 +295,7 @@ const pairPage = (local) => `<!doctype html>
   button{margin-top:14px;width:100%;padding:12px;border:0;border-radius:10px;background:#4f6ef7;
          color:#fff;font-size:15px;font-weight:600;cursor:pointer}
   button:disabled{opacity:.5}
+  a.enter{display:block;margin-top:14px;color:#8ab4ff;font-size:14px;text-decoration:none}
   .err{color:#f28b82;font-size:13px;margin-top:12px;min-height:18px}
   .qr{background:#fff;display:inline-block;padding:8px;border-radius:10px;line-height:0}
   .qrurl{font-size:11px;color:#9aa3b2;word-break:break-all;margin-top:10px;user-select:all}
@@ -304,10 +304,16 @@ const pairPage = (local) => `<!doctype html>
 </head>
 <body>
   <div class="stack">
-    <div class="card">
+    <div class="card" id="pairedcard" style="display:none">
+      <h1>这台设备已经配对过了</h1>
+      <p>凭据仍在有效期内，不需要重新输入配对码。</p>
+      <a class="enter" href="/">进入 dsh</a>
+    </div>
+    <div class="card" id="paircard">
       <h1>配对 dsh</h1>
-      <p>输入电脑终端里显示的 6 位配对码</p>
-      <input id="code" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
+      <p>输入电脑上 dsh 页面「配对」页签里显示的 6 位配对码</p>
+      <input id="code" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code"
+             enterkeyhint="go" autofocus>
       <button id="go">配对</button>
       <div class="err" id="err"></div>
     </div>
@@ -321,6 +327,7 @@ const pairPage = (local) => `<!doctype html>
   </div>
 <script>
 const KITA_LOCAL = ${local ? 'true' : 'false'}
+const KITA_PAIRED = ${paired ? 'true' : 'false'}
 const go = document.getElementById('go')
 const code = document.getElementById('code')
 const err = document.getElementById('err')
@@ -339,6 +346,9 @@ async function pair() {
     if (res.ok) { location.href = '/'; return }
     const body = await res.json().catch(() => ({}))
     let message = body.error || ('配对失败（HTTP ' + res.status + '）')
+    if (typeof body.remaining === 'number' && body.remaining > 0) {
+      message += '，还剩 ' + body.remaining + ' 次机会'
+    }
     if (autoPair) message += '，二维码里的配对码可能已轮换，请输入屏幕上的最新 6 位数字'
     err.textContent = message
   } catch { err.textContent = '网络错误，请重试' }
@@ -355,21 +365,31 @@ async function pair() {
   autoPair = true
   pair()
 })()
+let lastQr = null
 async function refreshQr() {
   try {
     const res = await fetch('/gateway-pair/qr.json', { cache: 'no-store' })
     if (!res.ok) return
     const data = await res.json()
-    document.getElementById('qrimg').innerHTML = data.svg || ''
-    document.getElementById('qrurl').textContent = data.svg
-      ? (data.url || '')
-      : '未取到本机局域网地址，请手动访问 http://<本机IP>:' + (data.port || '') + '/gateway-pair'
+    // Re-render only when the payload changed: rewriting the SVG every five
+    // seconds makes the code jump while someone is lining up a phone.
+    if (data.svg !== lastQr) {
+      lastQr = data.svg
+      document.getElementById('qrimg').innerHTML = data.svg || ''
+      document.getElementById('qrurl').textContent = data.svg
+        ? (data.url || '')
+        : '未取到本机局域网地址，请手动访问 http://<本机IP>:' + (data.port || '') + '/gateway-pair'
+    }
   } catch (e) { /* retry next tick */ }
 }
 if (KITA_LOCAL) {
   document.getElementById('localcard').style.display = 'block'
   refreshQr()
   setInterval(refreshQr, 5000)
+}
+if (KITA_PAIRED) {
+  document.getElementById('pairedcard').style.display = 'block'
+  document.getElementById('paircard').style.display = 'none'
 }
 </script>
 </body>
@@ -399,6 +419,9 @@ const ADMIN_PAGE = `<!doctype html>
   .row button{flex:none;background:#3a1d22;color:#f28b82;border:1px solid #5a2a32;border-radius:8px;
               padding:6px 12px;font-size:12px;cursor:pointer}
   .empty{font-size:13px;color:#9aa3b2}
+  .code button{margin-top:12px;background:#22305a;color:#cfe0ff;border:1px solid #35507f;
+               border-radius:8px;padding:8px 14px;font-size:13px;cursor:pointer;font-family:inherit}
+  .code button:disabled{opacity:.5;cursor:default}
   .qr{margin-top:16px;background:#1a1d24;border:1px solid #2a2e38;border-radius:14px;padding:18px;
       text-align:center}
   .qr .h{font-size:12px;color:#9aa3b2;margin-bottom:10px}
@@ -414,6 +437,8 @@ const ADMIN_PAGE = `<!doctype html>
     <div class="code">
       <div class="h">当前配对码（自动轮换）</div>
       <div class="v" id="code">------</div>
+      <div class="h" id="count">剩余 --:-- 轮换</div>
+      <button id="rotate" type="button">立即换一组配对码</button>
     </div>
     <div class="qr">
       <div class="h">扫码即配对（含当前配对码，随轮换自动更新）</div>
@@ -432,12 +457,30 @@ const ADMIN_PAGE = `<!doctype html>
   </div>
 <script>
 let lastQr = null
+let cache = null
+function renderCount() {
+  if (cache === null || !cache.issuedAt || !cache.codeMinutes) return
+  const left = cache.issuedAt + cache.codeMinutes * 60000 - Date.now()
+  const pad = (n) => String(n).padStart(2, '0')
+  document.getElementById('count').textContent = left > 0
+    ? '剩余 ' + Math.floor(left / 60000) + ':' + pad(Math.floor((left % 60000) / 1000)) + ' 轮换'
+    : '即将轮换…'
+}
+setInterval(renderCount, 1000)
+document.getElementById('rotate').addEventListener('click', async (event) => {
+  event.target.disabled = true
+  try { await fetch('/admin/rotate', { method: 'POST' }) } catch (e) { /* refresh below shows the truth */ }
+  event.target.disabled = false
+  refresh()
+})
 async function refresh() {
   try {
     const res = await fetch('/admin/code')
     const data = await res.json()
+    cache = data
     document.getElementById('code').textContent = data.code
     document.getElementById('fuse').style.display = data.fused ? 'block' : 'none'
+    renderCount()
     // Re-render the QR only when its payload changed: rewriting the SVG every
     // 5 seconds would make the code flicker while you line up the phone.
     if (data.qrSvg !== lastQr) {
@@ -463,11 +506,22 @@ async function refresh() {
         tText += ' · 最近 ' + new Date(d.lastActive).toLocaleString()
         if (d.lastIp && d.lastIp !== d.ip) tText += ' (' + d.lastIp + ')'
       }
+      if (d.expiresAt) {
+        const days = Math.max(0, Math.round((d.expiresAt - Date.now()) / 86400000))
+        tText += ' · 有效至 ' + new Date(d.expiresAt).toLocaleDateString() + '（剩 ' + days + ' 天）'
+      }
       t.textContent = tText
       const btn = document.createElement('button')
       btn.textContent = '吊销'
+      // Two-step: one tap on a phone must not drop the device you are holding.
       btn.addEventListener('click', async () => {
-        await fetch('/admin/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: d.token }) })
+        if (btn.dataset.armed !== '1') {
+          btn.dataset.armed = '1'
+          btn.textContent = '确认吊销'
+          setTimeout(() => { if (btn.dataset.armed === '1') { btn.dataset.armed = '0'; btn.textContent = '吊销' } }, 4000)
+          return
+        }
+        await fetch('/admin/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: d.id }) })
         refresh()
       })
       row.append(ua, t, btn)
@@ -575,25 +629,34 @@ function mountPanelBridge(ctx, api) {
     const recent = devices.map((d) => (d.lastIp !== '' ? d.lastIp : d.ip)).filter((ip) => isUsableIp(ip))
     const candidates = localCandidates(recent)
     const entry = entryOf(req.headers, req.socket?.remoteAddress ?? '')
-    const code = api.getCode()
+    const canControl = entry === ENTRY_LOCAL
+    // The pairing code is the entire authentication, so only the machine
+    // itself is given it — together with the QR that carries it. A paired
+    // phone (LAN or tunnel) reading the code off its own screen could hand a
+    // third device full access, which is exactly what the loopback-only rule
+    // on /gateway-pair and /gateway-pair/qr.json already prevents.
+    const code = canControl ? api.getCode() : ''
     const tunnel = api.tunnelState()
+    const qrTarget = canControl && candidates.length > 0 ? candidates[0].ip : ''
     return {
       ok: true,
       port: api.port,
       code,
-      issuedAt: api.getIssuedAt(),
-      codeMinutes: api.codeMinutes,
+      codeLocalOnly: !canControl,
+      issuedAt: canControl ? api.getIssuedAt() : 0,
+      codeMinutes: canControl ? api.codeMinutes : 0,
       fused: api.isFused(),
       failedThisHour: api.failedThisHour(),
       candidates,
       recentIp: recent.length > 0 ? recent[0] : '',
       devices,
+      selfId: api.selfId(req),
       entry,
-      canControl: entry === ENTRY_LOCAL,
-      localPairUrl: candidates.length > 0 ? pairUrl(`http://${candidates[0]}:${api.port}`, code) : '',
+      canControl,
+      localPairUrl: qrTarget === '' ? '' : pairUrl(`http://${qrTarget}:${api.port}`, code),
       tunnel: {
         ...tunnel,
-        pairUrl: tunnel.url === '' ? '' : pairUrl(tunnel.url, code),
+        pairUrl: !canControl || tunnel.url === '' ? '' : pairUrl(tunnel.url, code),
       },
     }
   }
@@ -612,13 +675,26 @@ function mountPanelBridge(ctx, api) {
         return
       }
       let action = ''
-      let token = ''
+      let id = ''
       try {
         const parsed = JSON.parse(await readBody(req))
         action = typeof parsed?.action === 'string' ? parsed.action : ''
-        token = typeof parsed?.token === 'string' ? parsed.token : ''
+        id = typeof parsed?.id === 'string' ? parsed.id : ''
       } catch {
         sendJson(res, 400, { ok: false, error: 'invalid JSON body' })
+        return
+      }
+      if (action === 'rotate') {
+        // Rotating the code is a local-only act for the same reason moving the
+        // tunnel is: a paired phone must not invalidate the code someone is
+        // reading off the desktop screen right now.
+        const entry = entryOf(req.headers, req.socket?.remoteAddress ?? '')
+        if (entry !== ENTRY_LOCAL) {
+          sendJson(res, 403, { ok: false, error: '仅本机（电脑上打开的 dsh 页面）能更换配对码' })
+          return
+        }
+        api.rotateCode()
+        sendJson(res, 200, { ok: true })
         return
       }
       if (action === 'tunnel-start' || action === 'tunnel-stop') {
@@ -635,11 +711,17 @@ function mountPanelBridge(ctx, api) {
         return
       }
       if (action === 'revoke') {
-        if (!/^[0-9a-f]{64}$/.test(token)) {
-          sendJson(res, 400, { ok: false, error: '设备凭据格式不正确，已拒绝执行' })
+        if (!/^[0-9a-f]{16}$/.test(id)) {
+          sendJson(res, 400, { ok: false, error: '设备句柄格式不正确，已拒绝执行' })
           return
         }
-        sendJson(res, 200, { ok: api.revoke(token) })
+        sendJson(res, 200, { ok: api.revoke(id) })
+        return
+      }
+      if (action === 'revoke-all') {
+        // `id` doubles as "the caller's own device": it is kept, so clearing
+        // the list from a phone cannot lock that phone out.
+        sendJson(res, 200, { ok: true, removed: api.revokeAll(/^[0-9a-f]{16}$/.test(id) ? id : '') })
         return
       }
       if (action === 'unlock') {
@@ -678,11 +760,23 @@ export function apply(ctx, config) {
     console.log(`[kita-dsh-gateway] 一键 Cloudflare 隧道就绪：${cloudflared}`)
   }
 
-  const tokens = loadTokens()
-  let currentCode = newCode()
+  const store = loadStore(storagePath())
+  const tokens = store.tokens
+  let currentCode = store.currentCode ?? newCode()
   /** When the current code was minted — the WebUI panel renders a countdown from it. */
   let codeIssuedAt = Date.now()
+  /**
+   * The code retired by the last rotation, still honoured for a short grace
+   * period so a phone that scanned the QR a moment too early is not punished.
+   * The QR itself always carries the live code.
+   */
+  let previousCode = ''
+  let previousUntil = 0
+  const CODE_GRACE_MS = 60 * 1000
   saveState(tokens, currentCode)
+  if (store.migrated) {
+    console.log('[kita-dsh-gateway] 凭据存储已迁移为哈希格式（旧明文令牌已即时哈希，设备无需重新配对）')
+  }
   const attempts = new Map() // ip -> { failures: number[], strikes: number, lockedUntil: number }
   const globalFailures = [] // failed-pair timestamps across all ips (pruned to the fuse window)
   let pairingFused = false // global kill switch after GLOBAL_FAIL_LIMIT failures in the window
@@ -741,6 +835,65 @@ export function apply(ctx, config) {
     console.log(`[kita-dsh-gateway] 配对码 ${currentCode}（${codeMinutes} 分钟内有效）`)
   }
 
+  /**
+   * Mint a new pairing code right now. The retired code stays acceptable for
+   * `CODE_GRACE_MS`, because a phone can scan the QR a second before a rotation
+   * and would otherwise be told its (correct) code is wrong.
+   */
+  const rotateCode = () => {
+    previousCode = currentCode
+    previousUntil = Date.now() + CODE_GRACE_MS
+    currentCode = newCode()
+    codeIssuedAt = Date.now()
+    saveState(tokens, currentCode)
+    printCode()
+  }
+
+  /** True when the input matches the live code, or the one just retired. */
+  const codeAccepted = (input) => {
+    if (timingSafeEqual(input, currentCode)) return true
+    return previousCode !== '' && Date.now() < previousUntil && timingSafeEqual(input, previousCode)
+  }
+
+  /**
+   * Resolve the handle the browser was given back to its store key.
+   * The browser never sees a token — only `deviceId()`'s 16 hex characters —
+   * so every revoke has to come back through this lookup.
+   */
+  const keyById = (id) => {
+    if (typeof id !== 'string' || !/^[0-9a-f]{16}$/.test(id)) return null
+    for (const key of tokens.keys()) {
+      if (key.slice(0, 16) === id) return key
+    }
+    return null
+  }
+
+  /** Revoke one device by its handle. @returns true when something was removed. */
+  const revokeById = (id) => {
+    const key = keyById(id)
+    if (key === null) return false
+    const removed = tokens.delete(key)
+    if (removed) saveState(tokens, currentCode)
+    return removed
+  }
+
+  /**
+   * Revoke every device except `exceptId`. @returns how many were removed.
+   * The caller passes the device making the request so a phone cannot lock
+   * itself out by accident when it clears the list.
+   */
+  const revokeAll = (exceptId = '') => {
+    const keep = exceptId === '' ? null : keyById(exceptId)
+    let removed = 0
+    for (const key of [...tokens.keys()]) {
+      if (keep !== null && key === keep) continue
+      tokens.delete(key)
+      removed += 1
+    }
+    if (removed > 0) saveState(tokens, currentCode)
+    return removed
+  }
+
   /** Debounced persistence of activity touches (2s batches request bursts). */
   let persistTimer = null
   const persistSoon = () => {
@@ -753,7 +906,7 @@ export function apply(ctx, config) {
   }
   /** Record one authenticated activity tick per token: last seen time + ip. */
   const touchToken = (token, req) => {
-    const meta = tokens.get(token)
+    const meta = tokens.get(hashToken(token))
     if (meta === undefined) return
     meta.lastActive = Date.now()
     meta.lastIp = clientIp(req)
@@ -795,7 +948,8 @@ export function apply(ctx, config) {
       }
       let code = null
       try { code = JSON.parse(body).code } catch { /* handled below */ }
-      if (typeof code !== 'string' || !timingSafeEqual(code, currentCode)) {
+      if (typeof code !== 'string' || !codeAccepted(code)) {
+        const failures = [...recent, now]
         globalFailures.push(now)
         const windowStart = now - GLOBAL_FAIL_WINDOW_MS
         while (globalFailures.length > 0 && globalFailures[0] < windowStart) globalFailures.shift()
@@ -803,14 +957,18 @@ export function apply(ctx, config) {
           pairingFused = true
           console.log('[kita-dsh-gateway] 全局熔断：一小时内配对失败过多，配对已禁用')
         }
-        attempts.set(ip, { failures: [...recent, now], strikes: state?.strikes ?? 0, lockedUntil: state?.lockedUntil ?? 0 })
+        attempts.set(ip, { failures, strikes: state?.strikes ?? 0, lockedUntil: state?.lockedUntil ?? 0 })
         res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: '配对码不正确' }))
+        res.end(JSON.stringify({
+          error: '配对码不正确',
+          remaining: Math.max(0, MAX_PAIR_ATTEMPTS - failures.length),
+        }))
         return
       }
       const token = crypto.randomBytes(32).toString('hex')
       const meta = { ua: String(req.headers['user-agent'] ?? '').slice(0, 200), at: Date.now(), ip, lastActive: Date.now() }
-      tokens.set(token, meta)
+      // Only the hash is stored: a copy of the state file is not a credential.
+      tokens.set(hashToken(token), meta)
       saveState(tokens, currentCode)
       attempts.delete(ip)
       console.log(`[kita-dsh-gateway] 已配对设备：${meta.ua || '未知'}（ip=${ip}）`)
@@ -831,7 +989,7 @@ export function apply(ctx, config) {
       // on this machine; a phone, a LAN neighbour or a tunnel visitor gets the
       // plain form.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
-      res.end(pairPage(isLoopback(req)))
+      res.end(pairPage(isLoopback(req), isAuthed(req, tokens) !== null))
       return
     }
     if (req.method === 'GET' && pathname === '/gateway-pair/qr.json') {
@@ -857,18 +1015,21 @@ export function apply(ctx, config) {
         return
       }
       if (req.method === 'GET' && pathname === '/admin/code') {
-        const devices = [...tokens.entries()].map(([token, meta]) => ({
-          token,
+        const devices = [...tokens.entries()].map(([hash, meta]) => ({
+          id: hash.slice(0, 16),
           ua: meta?.ua ?? '',
           at: meta?.at ?? 0,
           ip: meta?.ip ?? '',
           lastIp: meta?.lastIp ?? '',
           lastActive: meta?.lastActive ?? 0,
+          expiresAt: expiresAt(meta),
         }))
         const qr = pairingQr()
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
         res.end(JSON.stringify({
           code: currentCode,
+          issuedAt: codeIssuedAt,
+          codeMinutes,
           devices,
           fused: pairingFused,
           failedThisHour: globalFailures.length,
@@ -887,14 +1048,19 @@ export function apply(ctx, config) {
         res.end(JSON.stringify({ ok: true }))
         return
       }
+      if (req.method === 'POST' && pathname === '/admin/rotate') {
+        rotateCode()
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, code: currentCode }))
+        return
+      }
       if (req.method === 'POST' && pathname === '/admin/revoke') {
         let body = ''
         req.on('data', (chunk) => { body += chunk; if (body.length > 4096) req.destroy() })
         req.on('end', () => {
-          let token = null
-          try { token = JSON.parse(body).token } catch { /* handled below */ }
-          const ok = typeof token === 'string' && tokens.delete(token)
-          if (ok) saveState(tokens, currentCode)
+          let id = null
+          try { id = JSON.parse(body).id } catch { /* handled below */ }
+          const ok = revokeById(id)
           res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ ok }))
         })
@@ -916,7 +1082,7 @@ export function apply(ctx, config) {
       return
     }
     touchToken(token, req)
-    proxyHttp(req, res, targetPort)
+    proxyHttp(req, res, targetPort, pathname.startsWith('/kita-gateway/') ? token : '')
   })
 
   server.on('upgrade', (req, socket, head) => {
@@ -930,13 +1096,21 @@ export function apply(ctx, config) {
     proxyWs(req, socket, head, targetPort)
   })
 
-  const codeTimer = setInterval(() => {
-    currentCode = newCode()
-    codeIssuedAt = Date.now()
-    saveState(tokens, currentCode)
-    printCode()
-  }, codeMinutes * 60 * 1000)
+  const codeTimer = setInterval(rotateCode, codeMinutes * 60 * 1000)
   codeTimer.unref()
+
+  /**
+   * Expired credentials are already refused on every request (`isAuthed`); this
+   * only stops them from accumulating in the file of a long-running process.
+   */
+  const pruneTimer = setInterval(() => {
+    const removed = pruneExpired(tokens)
+    if (removed > 0) {
+      saveState(tokens, currentCode)
+      console.log(`[kita-dsh-gateway] 已清理 ${removed} 个过期设备凭据`)
+    }
+  }, 3600 * 1000)
+  pruneTimer.unref()
 
   /**
    * Bind the entry port, retrying briefly when the old instance has not let go
@@ -980,21 +1154,29 @@ export function apply(ctx, config) {
     tunnelState: () => tunnel.state(),
     tunnelStart: () => tunnel.start(tunnelStartTimeoutMs),
     tunnelStop: () => tunnel.stop(),
+    rotateCode: () => rotateCode(),
+    /**
+     * The handle of the device making this request, stamped by the gateway on
+     * the proxied panel hop. Empty for a direct loopback visit (the desktop
+     * page), which is not a paired device to begin with.
+     */
+    selfId: (req) => {
+      const value = req.headers[DEVICE_HEADER]
+      return typeof value === 'string' && /^[0-9a-f]{16}$/.test(value) ? value : ''
+    },
     listDevices: () => [...tokens.entries()]
-      .map(([token, meta]) => ({
-        token,
+      .map(([hash, meta]) => ({
+        id: hash.slice(0, 16),
         ua: meta?.ua ?? '',
         at: meta?.at ?? 0,
         ip: meta?.ip ?? '',
         lastIp: meta?.lastIp ?? '',
         lastActive: meta?.lastActive ?? 0,
+        expiresAt: expiresAt(meta),
       }))
       .sort((a, b) => b.lastActive - a.lastActive),
-    revoke: (token) => {
-      const removed = tokens.delete(token)
-      if (removed) saveState(tokens, currentCode)
-      return removed
-    },
+    revoke: (id) => revokeById(id),
+    revokeAll: (exceptId) => revokeAll(exceptId),
     unlock: () => {
       pairingFused = false
       globalFailures.length = 0
@@ -1013,6 +1195,7 @@ export function apply(ctx, config) {
 
   return () => {
     clearInterval(codeTimer)
+    clearInterval(pruneTimer)
     if (persistTimer !== null) clearTimeout(persistTimer)
     saveState(tokens, currentCode)
     // Never leave a public hostname pointing at a port this process just gave

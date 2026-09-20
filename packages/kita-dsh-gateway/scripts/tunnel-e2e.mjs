@@ -5,6 +5,8 @@
 // 4. paired cookie serves the dsh app + the mobile-files route through the tunnel
 // 5. websocket upgrade to /mobile-terminal proxies through the tunnel
 // 6. the test token is revoked afterwards (local admin API)
+import { deviceId } from '../lib/token-store.js'
+
 const TUNNEL = process.argv[2] ?? 'https://cheque-phpbb-correction-trains.trycloudflare.com'
 const LOCAL = 'http://127.0.0.1:3081'
 
@@ -78,7 +80,7 @@ async function main() {
   const revoke = await fetch(`${LOCAL}/admin/revoke`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token }),
+    body: JSON.stringify({ id: deviceId(token) }),
   })
   const revokeBody = await revoke.json()
   check('测试 token 已吊销', revoke.status === 200 && revokeBody.ok === true, `HTTP ${revoke.status}`)

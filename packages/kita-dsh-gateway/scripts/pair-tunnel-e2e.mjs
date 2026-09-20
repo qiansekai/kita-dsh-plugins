@@ -37,7 +37,10 @@ function check(label, condition, detail = '') {
   console.log(`  FAIL  ${label}${detail === '' ? '' : ` — ${detail}`}`)
 }
 
-const lanIp = process.env.KITA_LAN_IP || localCandidates([], os.networkInterfaces())[0] || ''
+// The first candidate is now the best *physical* adapter (virtual switches and
+// mobile hotspots are ranked below every real one), which is what a phone on the
+// same Wi-Fi can actually reach.
+const lanIp = process.env.KITA_LAN_IP || localCandidates([], os.networkInterfaces())[0]?.ip || ''
 if (lanIp === '') {
   console.error('no usable LAN address found; set KITA_LAN_IP')
   process.exit(2)
@@ -111,16 +114,27 @@ const state = await panel()
 check('panel GET succeeds', state.status === 200, `status=${state.status}`)
 check('panel marks this caller as local', state.body?.entry === 'local' && state.body?.canControl === true,
   `entry=${state.body?.entry} canControl=${state.body?.canControl}`)
-check('panel exposes the scannable LAN url',
-  typeof state.body?.localPairUrl === 'string' && state.body.localPairUrl === pairUrl(`http://${lanIp}:${GW_PORT}`, code),
+const panelTop = (state.body?.candidates ?? [])[0]
+const panelTopIp = typeof panelTop === 'string' ? panelTop : String(panelTop?.ip ?? '')
+check('the panel\'s first address is a physical adapter',
+  panelTopIp !== '' && panelTop?.virtual !== true, JSON.stringify(panelTop))
+check('panel exposes the scannable LAN url for its own top candidate',
+  typeof state.body?.localPairUrl === 'string'
+  && state.body.localPairUrl === pairUrl(`http://${panelTopIp}:${GW_PORT}`, code),
   String(state.body?.localPairUrl))
+check('the address this probe dials is among the candidates',
+  (state.body?.candidates ?? []).some((entry) => (typeof entry === 'string' ? entry : entry?.ip) === lanIp),
+  `lanIp=${lanIp} candidates=${JSON.stringify(state.body?.candidates)}`)
+check('every candidate names its adapter',
+  (state.body?.candidates ?? []).every((entry) => typeof entry === 'string' || (typeof entry.name === 'string' && entry.name !== '')),
+  JSON.stringify(state.body?.candidates))
 check('panel reports a ready tunnel', state.body?.tunnel?.available === true,
   JSON.stringify(state.body?.tunnel?.binary))
 // Whatever the tunnel and the paired devices were before this run, the run must
 // leave them that way: someone may be using this gateway from their phone while
 // the probe executes. Only what this script creates gets cleaned up or stopped.
 const tunnelWasRunning = state.body?.tunnel?.phase === 'running'
-const tokensBefore = new Set((state.body?.devices ?? []).map((device) => device.token))
+const tokensBefore = new Set((state.body?.devices ?? []).map((device) => device.id))
 if (tunnelWasRunning) console.log(`        (tunnel already running: ${state.body?.tunnel?.url} — left untouched)`)
 if (tokensBefore.size > 0) console.log(`        (${tokensBefore.size} device(s) already paired — left untouched)`)
 
@@ -160,6 +174,20 @@ try {
 check('the phone is not granted local control',
   phoneView?.entry === 'lan' && phoneView?.canControl === false,
   `entry=${phoneView?.entry} canControl=${phoneView?.canControl}`)
+// The pairing code is the whole authentication: a device that already holds a
+// credential must not be able to read it off its own screen and hand it on.
+check('a paired phone is never handed the pairing code',
+  phoneView?.code === '' && phoneView?.codeLocalOnly === true,
+  `code=${JSON.stringify(phoneView?.code)} codeLocalOnly=${phoneView?.codeLocalOnly}`)
+check('a paired phone gets no code-carrying url',
+  phoneView?.localPairUrl === '' && phoneView?.tunnel?.pairUrl === '',
+  `localPairUrl=${JSON.stringify(phoneView?.localPairUrl)}`)
+check('a paired phone is told which device it is',
+  typeof phoneView?.selfId === 'string' && phoneView.selfId.length === 16,
+  String(phoneView?.selfId))
+check('device rows carry a handle, never a token',
+  (phoneView?.devices ?? []).every((device) => typeof device.id === 'string' && device.token === undefined),
+  JSON.stringify((phoneView?.devices ?? [])[0] ?? null))
 const refused = await viaGateway('/kita-gateway/panel', {
   cookie,
   method: 'POST',
@@ -293,10 +321,10 @@ if (WITH_TUNNEL) {
 // ---------------------------------------------------------------------------
 console.log('\n[6] cleanup')
 const devicesNow = (await panel()).body?.devices ?? []
-const created = devicesNow.filter((device) => !tokensBefore.has(device.token))
+const created = devicesNow.filter((device) => !tokensBefore.has(device.id))
 let revoked = 0
 for (const device of created) {
-  const result = await panel('revoke', { token: device.token })
+  const result = await panel('revoke', { id: device.id })
   if (result.body?.ok === true) revoked += 1
 }
 check('exactly the pairing this run created was revoked', revoked === created.length,
