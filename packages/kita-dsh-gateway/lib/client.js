@@ -2510,6 +2510,12 @@ var qrcode = function() {
 				const tunnelQrUrl = typeof tunnel.pairUrl === "string" && tunnel.pairUrl !== ""
 					? tunnel.pairUrl
 					: (typeof tunnel.url === "string" && tunnel.url !== "" ? tunnel.url + "/gateway-pair" : "");
+				// The Host half hands over the pairing link (code in the fragment) while
+				// the tunnel is up and this is the machine's own page; the copy button
+				// gives exactly that, so a pasted link pairs on open.
+				const tunnelCopy = typeof tunnel.pairUrl === "string" && tunnel.pairUrl !== ""
+					? tunnel.pairUrl
+					: tunnel.url;
 				const qr = tunnelQrUrl !== "" ? buildQr(tunnelQrUrl) : null;
 				const started = typeof tunnel.startedAt === "number" && tunnel.startedAt > 0
 					? "开启于 " + formatTime(tunnel.startedAt)
@@ -2524,8 +2530,11 @@ var qrcode = function() {
 						react.createElement("div", { className: "kitaPair_actions" },
 							tunnel.phase === "running" ? react.createElement("button", {
 								className: "kitaPair_btn kitaPair_btnSm", type: "button",
-								onClick: () => copyText(tunnel.url),
-							}, "复制公网地址") : null,
+								title: tunnelCopy.includes("/gateway-pair")
+									? "复制带配对码的公网直链：对方打开即自动配对"
+									: "复制公网地址",
+								onClick: () => copyText(tunnelCopy),
+							}, tunnelCopy.includes("/gateway-pair") ? "复制公网直链（含配对码）" : "复制公网地址") : null,
 							react.createElement("button", {
 								className: "kitaPair_btn kitaPair_btnSm kitaPair_btnDanger", type: "button",
 								disabled: locked,
@@ -2534,7 +2543,8 @@ var qrcode = function() {
 							lockedNote,
 						),
 						react.createElement("div", { className: "kitaPair_hint" },
-							"公网可达期间，任何拿到配对码的人都能进入 dsh；不用时请关闭。"),
+							"公网可达期间，任何拿到配对码的人都能进入 dsh；不用时请关闭。"
+							+ "「复制公网直链」给的是带配对码的地址，打开即自动配对——请勿随意外发。"),
 					),
 					qr === null ? null : react.createElement("div", { className: "kitaPair_qrBox", key: "qr" },
 						react.createElement("div", { className: "kitaPair_qr" },
@@ -2714,6 +2724,10 @@ var qrcode = function() {
 					const adapters = typeof entry === "object" && entry !== null ? String(entry.name || "") : "";
 					const virtualAdapter = typeof entry === "object" && entry !== null && entry.virtual === true;
 					const url = ip === "" ? "" : "http://" + ip + ":" + data.port;
+					// The Host half adds the pairing link (code in the fragment) on the
+					// machine's own page; a remote page keeps the bare address.
+					const copyUrl = typeof entry === "object" && entry !== null
+						&& typeof entry.pairUrl === "string" && entry.pairUrl !== "" ? entry.pairUrl : url;
 					return react.createElement("div", {
 						className: "kitaPair_cand" + (index === 0 ? " kitaPair_candFirst" : ""),
 						key: ip === "" ? String(index) : ip,
@@ -2724,7 +2738,10 @@ var qrcode = function() {
 							adapters === "" ? null : react.createElement("span", { className: "kitaPair_candName" }, adapters)),
 						react.createElement("button", {
 							className: "kitaPair_btn kitaPair_btnSm", type: "button",
-							onClick: () => copyText(url),
+							title: copyUrl === url
+								? "复制该地址"
+								: "复制带配对码的直链：对方打开即自动配对",
+							onClick: () => copyText(copyUrl),
 						}, "复制"),
 					);
 				});

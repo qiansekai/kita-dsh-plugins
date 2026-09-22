@@ -189,6 +189,11 @@ quiet('\n[3] pairing, refusals and the rotation grace window')
     `entry=${desktop.body?.entry}`)
   check('a desktop panel read gets the code', /^\d{6}$/.test(desktop.body?.code ?? ''), String(desktop.body?.code))
   check('a desktop panel read gets a scannable url', (desktop.body?.localPairUrl ?? '').includes('#k='))
+  check('desktop candidates each carry a code-carrying link',
+    Array.isArray(desktop.body?.candidates) && desktop.body.candidates.length > 0
+    && desktop.body.candidates.every((c) => c.pairUrl
+      === `http://${c.ip}:${desktop.body.port}/gateway-pair#k=${desktop.body.code}`),
+    JSON.stringify(desktop.body?.candidates?.map((c) => c.pairUrl)))
 
   const phone = await gwJson('/kita-gateway/panel', { headers: { Cookie: freshCookie } })
   check('a phone panel read is marked lan', phone.body?.entry === 'lan', String(phone.body?.entry))
@@ -197,6 +202,9 @@ quiet('\n[3] pairing, refusals and the rotation grace window')
     phone.body?.code === '' && phone.body?.codeLocalOnly === true, JSON.stringify(phone.body?.code))
   check('a phone panel read gets no code-carrying url',
     phone.body?.localPairUrl === '' && phone.body?.tunnel?.pairUrl === '')
+  check('a phone panel read gets no code-carrying candidate link',
+    (phone.body?.candidates ?? []).every((c) => c.pairUrl === ''),
+    JSON.stringify(phone.body?.candidates?.map((c) => c.pairUrl)))
   check('a phone panel read names its own device',
     typeof phone.body?.selfId === 'string' && phone.body.selfId.length === 16, String(phone.body?.selfId))
   check('device rows carry a handle and no token',

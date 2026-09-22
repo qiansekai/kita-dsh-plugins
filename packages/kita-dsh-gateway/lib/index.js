@@ -638,6 +638,14 @@ function mountPanelBridge(ctx, api) {
     const code = canControl ? api.getCode() : ''
     const tunnel = api.tunnelState()
     const qrTarget = canControl && candidates.length > 0 ? candidates[0].ip : ''
+    // Every candidate ships a ready-made pairing link when this is the
+    // machine's own page, so the copy button hands over exactly what the QR
+    // encodes: pasted into any browser, the link pairs without typing the
+    // code. Remote callers get '' and fall back to the bare address.
+    const candidateList = candidates.map((entry) => ({
+      ...entry,
+      pairUrl: canControl ? pairUrl(`http://${entry.ip}:${api.port}`, code) : '',
+    }))
     return {
       ok: true,
       port: api.port,
@@ -647,7 +655,7 @@ function mountPanelBridge(ctx, api) {
       codeMinutes: canControl ? api.codeMinutes : 0,
       fused: api.isFused(),
       failedThisHour: api.failedThisHour(),
-      candidates,
+      candidates: candidateList,
       recentIp: recent.length > 0 ? recent[0] : '',
       devices,
       selfId: api.selfId(req),
