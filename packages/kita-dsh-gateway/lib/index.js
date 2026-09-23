@@ -744,9 +744,23 @@ function mountPanelBridge(ctx, api) {
   console.log(`[kita-dsh-gateway] WebUI 配对面板已挂载 ${PANEL_PATH}`)
 }
 
+/**
+ * Instance-scoped port override. Two dsh instances can legitimately share one
+ * home (production on 3080 plus a shadow instance on 3280 for verification),
+ * but the home-level `cordis.patch.yml` can only hold ONE gateway port — the
+ * second instance to boot otherwise loses the bind and loops on EADDRINUSE
+ * (outages on 2026-09-23 and 2026-09-24). The start script passes
+ * `DSH_GATEWAY_PORT` / `DSH_GATEWAY_TARGET_PORT` derived from that instance's
+ * own web port; the environment wins over the file config.
+ */
+function envPort(name) {
+  const value = Number(process.env[name])
+  return Number.isInteger(value) && value > 0 && value <= 65535 ? value : undefined
+}
+
 export function apply(ctx, config) {
-  const port = config?.port ?? 3081
-  const targetPort = config?.targetPort ?? 3080
+  const port = envPort('DSH_GATEWAY_PORT') ?? config?.port ?? 3081
+  const targetPort = envPort('DSH_GATEWAY_TARGET_PORT') ?? config?.targetPort ?? 3080
   const codeMinutes = config?.codeMinutes ?? 10
   const tunnelStartTimeoutMs = config?.tunnelStartTimeoutMs ?? 25000
   /**
