@@ -1,0 +1,26 @@
+{
+  "name": "kita-terminal-autoscroll",
+  "description": "Sticky-bottom auto-scroll for dsh terminal output surfaces: follow newly appended output while the user stays at the bottom, pause while they scroll up, resume at the bottom.",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  },
+  "files": [
+    "lib"
+  ],
+  "dependencies": {},
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "license": "MIT"
+}
