@@ -32,6 +32,9 @@ dsh 看到的是本地客户端（loopback 围栏通过、本地专属功能可�
         tunnelProtocol: http2         # 隧道传输：auto | http2 | quic（默认 http2，见下）
         adminToken: ''                # 可选：钉死本机管理令牌（默认自动生成并存盘）
         tunnelStartTimeoutMs: 25000   # tunnel-start 等待公网地址的上限
+        tunnelEdgeIpVersion: '4'    # 快速隧道 Edge IP 族：auto | 4 | 6（国内建议 4）
+        tunnelRetries: 10            # 连接/协议错误重试次数；0 = cloudflared 默认 5
+        tunnelRegion: ''             # Cloudflare Edge 区域；空 = 全球
 ```
 
 `cloudflaredPath` 是**部署值**（本机路径写配置，不写进代码）：本机 cloudflared 不在 PATH，
@@ -117,6 +120,20 @@ WebUI「配对」页签走同一把尺子：`GET /kita-gateway/panel` 只在本�
 **零注册**，`--protocol http2` **1 秒** 打出 `Registered tunnel connection`；端到端 http2 隧道得
 **401**（网关配对保护，说明请求真的到达网关），QUIC 隧道得 **530**。需要 QUIC 时把该项设为
 `auto`/`quic`。`state().protocol` 会回报实际使用的传输，便于面板/日志归因。
+
+**Edge IP 族与重试（`tunnelEdgeIpVersion` / `tunnelRetries` / `tunnelRegion`）**：quick tunnel 的 Edge
+默认交给 cloudflared（`--edge-ip-version auto`），而国内链路上 IPv6 到 Cloudflare anycast 常绕远甚至
+直接丢包 —— 钉 `4` 通常立刻改善；`--retries` 默认 5，链路抖动时过早放弃，调到 10 更耐抖。
+三项**留默认（`auto` / `0` / 空）时不向 cloudflared 传任何参数**，argv 与历史版本逐字一致。
+
+**真正的硬伤是域名**：quick tunnel 拿到的是随机 `*.trycloudflare.com`，cloudflared 一重建就换 URL，
+手机书签随之失效（体感就是「又掉线了」），且该域名在国内被大量滥用、干扰概率高。要固定入口得用
+named tunnel（需要自有域名接入 Cloudflare），本项目目前只做 quick tunnel。
+
+**国内稳定性路线（2026-09-28 结论）**：CF 快速隧道受国内到 Cloudflare 的边缘质量限制，上面的参数是
+缓解不是根治。长期主入口建议用国内节点的穿透（frp / sakurafrp）或自建 frps；网关的本机管理令牌
+已经让「frp 冒充 loopback 读走配对码」不再成立（见上节），所以隧道类型不再是安全分水岭。
+**隧道只是通道，鉴权始终在网关**：无论用哪条隧道，都不要绕过配对码。
 
 **权限**：只有**本机页面**能开关隧道。手机（无论走局域网还是隧道）调用会得到 `403`：
 经局域网/隧道到达的请求会被拒绝，避免已配对的设备把网关暴露到公网或关掉他人正在使用的隧道。

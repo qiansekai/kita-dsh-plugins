@@ -77,6 +77,13 @@ export function resolveCloudflared(explicitPath, env = process.env) {
  * silently drop QUIC leave `auto` retrying forever — the edge then has no
  * connection and answers every public request with Error 1033 — so `http2` is
  * what makes the tunnel usable there (see the 2026-09-14 note in DSH-SETUP.md).
+ * @param options.edgeIpVersion - '4' or '6' pins the edge IP family; anything
+ * else leaves cloudflared's own `auto`. Pinning 4 is the usual fix for a
+ * Chinese campus/carrier path, where the v6 route to Cloudflare's anycast
+ * detours or drops outright.
+ * @param options.retries - connection/protocol retries; 0 keeps cloudflared's
+ * own default (5).
+ * @param options.region - Cloudflare Edge region; '' keeps the global region.
  * @param options.log - logger with console's shape.
  * @param options.spawnImpl - process factory, injectable so the controller can
  * be exercised without a real cloudflared (`scripts/verify-gateway.mjs`).
@@ -92,6 +99,14 @@ export function createTunnel(options = {}) {
   const spawnImpl = typeof options.spawnImpl === 'function' ? options.spawnImpl : spawn
   /** Transport override; anything unrecognized means cloudflared's own choice. */
   const protocol = options.protocol === 'http2' || options.protocol === 'quic' ? options.protocol : 'auto'
+  /** Edge IP family; only 4 and 6 are forwarded, everything else stays `auto`. */
+  const edgeIpVersion = options.edgeIpVersion === '4' || options.edgeIpVersion === '6'
+    ? options.edgeIpVersion
+    : 'auto'
+  /** Retry budget; 0 means 'do not pass the flag' — cloudflared defaults to 5. */
+  const retries = Number.isInteger(options.retries) && options.retries > 0 ? options.retries : 0
+  /** Edge region; empty means the flag is omitted and the global region is used. */
+  const region = typeof options.region === 'string' ? options.region.trim() : ''
 
   let current = null // live child process, null when stopped
   let url = ''
@@ -190,6 +205,9 @@ export function createTunnel(options = {}) {
     available: binary !== '',
     binary,
     protocol,
+    edgeIpVersion,
+    retries,
+    region,
     phase: current !== null
       ? (url === '' ? 'starting' : 'running')
       : (restartTimer !== null ? 'starting' : (error === '' ? 'stopped' : 'error')),
@@ -232,6 +250,11 @@ export function createTunnel(options = {}) {
     // `auto` is left to cloudflared (it prefers QUIC). A forced protocol is what
     // rescues networks where QUIC never registers — see the option docs above.
     if (protocol !== 'auto') args.push('--protocol', protocol)
+    // The flags below are omitted unless configured, so the default argv stays
+    // exactly what it always was (and the tunnel tests keep asserting that).
+    if (edgeIpVersion !== 'auto') args.push('--edge-ip-version', edgeIpVersion)
+    if (retries > 0) args.push('--retries', String(retries))
+    if (region !== '') args.push('--region', region)
     let proc = null
     try {
       proc = spawnImpl(binary, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })

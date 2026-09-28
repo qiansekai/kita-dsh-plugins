@@ -269,6 +269,50 @@ console.log('\n[5] tunnel controller')
 }
 
 {
+  // China-facing knobs: the v6 route to Cloudflare's anycast often detours or
+  // drops, and the default retry budget (5) gives up too early on a flapping
+  // link. Values left at their defaults must not change the argv at all.
+  const captured = []
+  const factory = (bin, args, opts) => {
+    const proc = fakeProcess()
+    captured.push({ bin, args, opts })
+    return proc
+  }
+  const pinned = createTunnel({
+    port: 3081,
+    binary: 'cloudflared',
+    log: { log() {}, error() {} },
+    protocol: 'http2',
+    edgeIpVersion: '4',
+    retries: 10,
+    region: 'us',
+    spawnImpl: factory,
+  })
+  await pinned.start(2000)
+  equal('the edge family, retry budget and region reach cloudflared',
+    captured[0].args.join(' '),
+    'tunnel --url http://127.0.0.1:3081 --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 10 --region us')
+  const pinnedState = pinned.state()
+  check('the edge settings are reported for diagnosis',
+    pinnedState.edgeIpVersion === '4' && pinnedState.retries === 10 && pinnedState.region === 'us')
+  await pinned.dispose()
+
+  const relaxed = createTunnel({
+    port: 3081,
+    binary: 'cloudflared',
+    log: { log() {}, error() {} },
+    edgeIpVersion: 'auto',
+    retries: 0,
+    region: '',
+    spawnImpl: factory,
+  })
+  await relaxed.start(2000)
+  equal('auto with no retries and no region leaves the argv untouched',
+    captured[1].args.join(' '), 'tunnel --url http://127.0.0.1:3081 --no-autoupdate')
+  await relaxed.dispose()
+}
+
+{
   // The tunnel must refuse to pretend it works when the binary is missing.
   const tunnel = createTunnel({ port: 3081, binary: '', log: { log() {}, error() {} } })
   equal('no binary -> unavailable', tunnel.state().available, false)

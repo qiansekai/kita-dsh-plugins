@@ -84,6 +84,16 @@ export const Config = z.object({
   /** How long a `tunnel-start` request waits for the public URL. */
   tunnelStartTimeoutMs: z.natural().max(120000).default(25000),
   /**
+   * Edge IP family for the one-click tunnel: `auto` (cloudflared's own choice),
+   * `4` or `6`. Pinning 4 is the usual fix on a Chinese campus/carrier path,
+   * where the v6 route to Cloudflare's anycast detours or drops outright.
+   */
+  tunnelEdgeIpVersion: z.union(['auto', '4', '6']).default('auto'),
+  /** Connection/protocol retries; 0 keeps cloudflared's own default (5). */
+  tunnelRetries: z.natural().max(100).default(0),
+  /** Cloudflare Edge region; empty string keeps the global region. */
+  tunnelRegion: z.string().default(''),
+  /**
    * Pin the local-admin secret instead of letting the gateway mint one into
    * `<DSH_HOME>/storages/kita-dsh-gateway-admin.json`. A deployment value;
    * empty (the default) means "read the file, mint on first boot".
@@ -846,6 +856,9 @@ export function apply(ctx, config) {
     binary: cloudflared,
     restartLimit: config?.tunnelRestartLimit ?? 5,
     protocol: config?.tunnelProtocol ?? 'http2',
+    edgeIpVersion: config?.tunnelEdgeIpVersion ?? 'auto',
+    retries: config?.tunnelRetries ?? 0,
+    region: config?.tunnelRegion ?? '',
   })
   if (cloudflared === '') {
     console.log('[kita-dsh-gateway] 未找到 cloudflared，一键 Cloudflare 隧道不可用'
