@@ -11,8 +11,9 @@ dsh webserver 只监听 127.0.0.1，手机/其他设备访问不了；直接改�
 dsh 看到的是本地客户端（loopback 围栏通过、本地专属功能可用）；WebSocket 升级
 （mux/host 事件流）同样反代。
 
-**对抗的威胁**：局域网邻居，以及指向该端口的 frp / cloudflared / tailscale 隧道。
-**不防护**：本机已运行的进程（它们能读 token 文件）。
+**对抗的威胁**：局域网邻居，以及指向该端口的任意隧道（cloudflared / frp / sakurafrp / ngrok / tailscale）。
+**本机管理面**（配对码 / 二维码 / `/admin`）另需一道本机管理令牌，见「本机管理面为什么需要令牌」。
+**不防护**：本机已运行的进程（它们能读 token 文件与令牌文件）。
 
 ## 装配
 
@@ -29,6 +30,7 @@ dsh 看到的是本地客户端（loopback 围栏通过、本地专属功能可�
         cloudflaredPath: ''           # 空 = 依次查 CLOUDFLARED_PATH、PATH
         tunnelRestartLimit: 5         # 隧道进程意外退出后的自动重启上限
         tunnelProtocol: http2         # 隧道传输：auto | http2 | quic（默认 http2，见下）
+        adminToken: ''                # 可选：钉死本机管理令牌（默认自动生成并存盘）
         tunnelStartTimeoutMs: 25000   # tunnel-start 等待公网地址的上限
 ```
 
@@ -51,12 +53,25 @@ dsh 看到的是本地客户端（loopback 围栏通过、本地专属功能可�
 | 位置 | 可见条件 | 说明 |
 |---|---|---|
 | WebUI「配对」页签 | 桌面/手机页面均可打开 | 大字配对码 + 二维码 + 访问地址候选 + 设备列表 |
-| `GET /admin` 本机管理页 | **仅本机**（loopback） | 配对码 + 二维码 + 设备吊销 + 熔断解锁 |
-| `GET /gateway-pair` 配对页 | 二维码区块**仅本机**显示 | 电脑上打开该页时可直接扫给手机 |
+| `GET /admin` 本机管理页 | **本机 + 管理令牌** | 配对码 + 二维码 + 设备吊销 + 熔断解锁 |
+| `GET /gateway-pair` 配对页 | 二维码区块在**本机 + 管理令牌**下显示 | 电脑上打开该页时可直接扫给手机 |
 
-**远程页面永不携带配对码**：`/gateway-pair` 与 `/gateway-pair/qr.json` 只在 loopback 请求下渲染二维码，
-局域网访客与隧道访客拿到的是纯输入框（否则任何能打开该页的人都能读到配对码，等于绕过整个鉴权）。
-`/admin` 整段路径同样 loopback-only。
+**远程页面永不携带配对码**：`/gateway-pair` 与 `/gateway-pair/qr.json` 只在
+  **本机 + 管理令牌**（见下节）才能渲染二维码；局域网访客与隧道访客拿到的是纯输入框，
+  本机但还没拿到令牌的浏览器会被明确告知去哪里取入口链接。`/admin` 整段路径同样要求令牌。
+
+### 本机管理面为什么需要令牌（2026-09-28 事故）
+
+此前「本机」= socket 对端是 loopback，只对 cloudflared 做过例外（认 `CF-Connecting-IP`）。
+但 frp / sakurafrp / ngrok 这类隧道**没有**等价头部：frpc 跑在宿主机上，替公网访客从 127.0.0.1 拨入，
+于是 `https://<frp 域名>/gateway-pair` 被判成本机页面，二维码与 `/gateway-pair/qr.json` 把当时的 6 位配对码
+直接交给公网（实测 `[MEASURED]`：`/admin/code` 亦一并可达）。配对码就是全部鉴权，
+等于任何人访问该公网地址都能换到 90 天凭据、拿到 dsh 全权。
+
+修法不是「再认一个头部」——未知隧道在 socket 层与本机浏览器无法区分 —— 而是要求**本机凭据**：
+网关首次启动生成 32 字节令牌存进 `storages/kita-dsh-gateway-admin.json`，
+本机浏览器打开一次入口链接（`/gateway-pair?a=<令牌>`）换取 HttpOnly cookie，此后本机面才可见。
+loopback 仍要求，但降为第二条件：链接被复制到别处也打不开任何东西。
 
 WebUI「配对」页签走同一把尺子：`GET /kita-gateway/panel` 只在本机来源（`entry === local`）返回
 `code` / `localPairUrl` / `tunnel.pairUrl`，手机与隧道访客拿到的是空码 + `codeLocalOnly: true` 与一段说明。
@@ -151,11 +166,12 @@ host 侧（`lib/qr.js`，用于配对页与管理页的服务端渲染）与 cli
 
 ## 配对流程
 
-1. 启动 dsh 后控制台打印一次性配对码 —— dsh 常由隐藏窗口的启动器拉起，看不到终端时改到 dsh 页面的「配对」页签
-   或 `http://127.0.0.1:3081/admin` 读取；
-2. 手机浏览器打开 `http://<主机LAN-IP>:3081`（或扫二维码直达并自动配对）；
-3. 签发 90 天 token，**只把 `sha256(token)` 落到** `<DSH_HOME>/storages/kita-dsh-gateway-tokens.json`；
-4. 后续访问免配对，直到 token 过期（在每次请求上判定）、主机吊销，或存储文件被删。
+1. 首次部署后，dsh 启动日志会打印「本机管理入口」链接（同一行也写入
+   `<DSH_HOME>/storages/kita-dsh-gateway-admin-url.txt`）。在电脑上打开它一次，浏览器即拿到本机管理令牌；
+2. 此后配对码可从本机 dsh 页面的「配对」页签（127.0.0.1:3080 直连）或 `http://127.0.0.1:3081/admin` 读取；
+3. 手机浏览器打开 `http://<主机LAN-IP>:3081`（或扫二维码直达并自动配对）；
+4. 签发 90 天 token，**只把 `sha256(token)` 落到** `<DSH_HOME>/storages/kita-dsh-gateway-tokens.json`；
+5. 后续访问免配对，直到 token 过期（在每次请求上判定）、主机吊销，或存储文件被删。
 
 不在同一 Wi-Fi 时：在电脑面板上点「一键开启 CF 隧道」，用公网二维码扫码即可。
 
@@ -169,13 +185,19 @@ host 侧（`lib/qr.js`，用于配对页与管理页的服务端渲染）与 cli
 - 90 天 TTL 在**每次请求**上判定（不再只在启动时过滤一次），另有每小时一次的后台清理；
 - 状态文件**原子写**（临时文件 + rename）：半截写入不会让全部设备静默登出、配对码也不会无故重置；
 - `x-kita-gw-device` 由网关在 `/kita-gateway/` 路径上注入并先剥离同名入站头，LAN 客户端无法冒名；
-- 配对码只在本机渲染（见上「扫码即配对」），隧道开关与「立即换码」仅本机可操作。
+- 配对码只在本机渲染（见上「扫码即配对」），隧道开关与「立即换码」仅本机可操作；
+- **本机管理令牌**：配对码、二维码、`/admin` 全部要求本机浏览器出示令牌（`kita_gw_admin` cookie）；
+  令牌由网关首次启动时生成，落在 `<DSH_HOME>/storages/kita-dsh-gateway-admin.json`，
+  只有这台机器读得到，任何隧道都伪造不了、也拿不到。
 
 ## 安全警告
 
 配对成功即等于获得 dsh 完整操作权限。**默认仅在可信局域网使用**；
 开隧道会让公网可达，任何拿到配对码的人都能进入 —— 临时用完请及时关闭。
 隧道只暴露网关（带配对鉴权），永远不要直接把 `dsh web` 的 loopback 端口暴露出去。
+**不要用 frp / sakurafrp 这类自建穿透暴露 3081**：frpc 就跑在本机，它替公网访客拨的是 127.0.0.1，
+任何只看来源地址的判定都会被它骗过（2026-09-28 事故，见下）。要么用插件自带的 CF 隧道，
+要么在穿透平台侧加访问认证与来源白名单。
 
 ## 实测记录（2026-09-11）
 

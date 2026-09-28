@@ -114,6 +114,22 @@ const postJson = (path, body, extra = {}) => ({
   body: JSON.stringify(body),
 })
 
+// The local-admin grant the plugin minted at boot, and the browser cookie it
+// hands out. Every local-only surface needs it: loopback alone is not proof,
+// because a tunnel agent (frpc, cloudflared, ngrok) dials in from 127.0.0.1
+// on behalf of the internet and would otherwise look exactly like a browser.
+const adminSecretFile = join(home, 'storages', 'kita-dsh-gateway-admin.json')
+const adminSecret = JSON.parse(readFileSync(adminSecretFile, 'utf8')).secret
+const adminCookie = `kita_gw_admin=${adminSecret}`
+const adminGw = (path, options = {}) => gw(path, {
+  ...options,
+  headers: { Cookie: adminCookie, ...(options.headers ?? {}) },
+})
+async function adminJson(path, options = {}) {
+  const res = await adminGw(path, options)
+  return { status: res.status, headers: res.headers, body: await res.json().catch(() => null) }
+}
+
 // ---------------------------------------------------------------------------
 quiet('\n[1] the v1 -> v2 credential migration')
 {
@@ -130,15 +146,39 @@ quiet('\n[1] the v1 -> v2 credential migration')
 // ---------------------------------------------------------------------------
 quiet('\n[2] the pairing page knows who is looking at it')
 {
-  const local = await (await gw('/gateway-pair')).text()
-  check('a local pairing page renders the QR block',
+  // Loopback without the grant is the tunnel case: frpc dials from 127.0.0.1,
+  // so this request is byte-for-byte what an internet visitor produces.
+  const locked = await (await gw('/gateway-pair')).text()
+  check('a loopback page without the grant hides the QR block',
+    locked.includes('KITA_LOCAL = false') && locked.includes('KITA_LOCKED = true'))
+  check('a loopback page without the grant carries no code-carrying link',
+    locked.includes('/gateway-pair#k=') === false)
+  const deniedQr = await gwJson('/gateway-pair/qr.json')
+  check('qr.json without the grant is 404', deniedQr.status === 404, `status=${deniedQr.status}`)
+  const deniedAdmin = await gwJson('/admin/code')
+  check('the admin surface without the grant refuses the request', deniedAdmin.status === 403, `status=${deniedAdmin.status}`)
+
+  const local = await (await adminGw('/gateway-pair')).text()
+  check('a local pairing page with the grant renders the QR block',
     local.includes('KITA_LOCAL = true') && local.includes('id="localcard"'))
   check('a local page with no cookie is not marked paired', local.includes('KITA_PAIRED = false'))
   check('the code is read from the URL fragment', local.includes('k=(\\d{6})'))
   const paired = await (await gw('/gateway-pair', { headers: { Cookie: `kita_gw=${legacyToken}` } })).text()
   check('an already-paired device is told so', paired.includes('KITA_PAIRED = true'))
+  // The operator is handed the grant through a file and a log line, because
+  // those are the only channels a tunnel cannot read.
+  const adminEntry = readFileSync(join(home, 'storages', 'kita-dsh-gateway-admin-url.txt'), 'utf8').trim()
+  check('the entry-link file carries the local grant',
+    adminEntry === `http://127.0.0.1:${GW}/gateway-pair?a=${adminSecret}`, adminEntry.slice(0, 72))
+  check('a wrong grant does not open the admin surface', (await gw('/admin?a=wrong')).status === 403)
+  const handover = await gw(`/gateway-pair?a=${adminSecret}`)
+  check('the entry link hands the browser a grant cookie',
+    handover.status === 302
+    && (handover.headers.get('set-cookie') ?? '').startsWith('kita_gw_admin=')
+    && handover.headers.get('location') === '/gateway-pair',
+    `status=${handover.status} location=${handover.headers.get('location')}`)
 
-  const qr = await gwJson('/gateway-pair/qr.json')
+  const qr = await adminJson('/gateway-pair/qr.json')
   check('the QR payload carries the restored pairing code', qr.body?.code === '111111', String(qr.body?.code))
   check('the QR url carries the code in the fragment', /#k=111111$/.test(qr.body?.url ?? ''), String(qr.body?.url))
   check('the QR payload lists adapter-named candidates',
@@ -162,8 +202,8 @@ quiet('\n[3] pairing, refusals and the rotation grace window')
   check('the freshly issued token is stored hashed',
     onDisk.tokens[token] === undefined && Object.keys(onDisk.tokens).length === 2)
 
-  await gw('/admin/rotate', { method: 'POST' })
-  const admin = await gwJson('/admin/code')
+  await adminGw('/admin/rotate', { method: 'POST' })
+  const admin = await adminJson('/admin/code')
   check('rotating mints a new code', admin.body?.code !== '111111', String(admin.body?.code))
   const grace = await gw('/pair', postJson('/pair', { code: '111111' }))
   check('the retired code still works inside the grace window', grace.status === 200, `status=${grace.status}`)
@@ -174,7 +214,7 @@ quiet('\n[3] pairing, refusals and the rotation grace window')
   check('admin device rows never carry a token', devices.every((d) => d.token === undefined))
   check('admin device rows carry an expiry',
     devices.every((d) => typeof d.expiresAt === 'number' && d.expiresAt > Date.now()))
-  const removed = await gwJson('/admin/revoke', postJson('/admin/revoke', { id: devices[0].id }))
+  const removed = await adminJson('/admin/revoke', postJson('/admin/revoke', { id: devices[0].id }))
   check('admin revoke accepts a handle', removed.status === 200 && removed.body?.ok === true, `status=${removed.status}`)
 
   // Keep a live credential for the panel checks below.
@@ -229,7 +269,7 @@ quiet('\n[3] pairing, refusals and the rotation grace window')
   const bulk = await asPhone({ action: 'revoke-all', id: phone.body.selfId })
   check('revoke-all reports what it removed', bulk.body?.ok === true && typeof bulk.body?.removed === 'number',
     JSON.stringify(bulk.body))
-  const left = (await gwJson('/admin/code')).body?.devices ?? []
+  const left = (await adminJson('/admin/code')).body?.devices ?? []
   check('revoke-all keeps the device that asked',
     left.length === 1 && left[0].id === phone.body.selfId, JSON.stringify(left.map((d) => d.id)))
 }

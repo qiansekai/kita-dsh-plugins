@@ -16,6 +16,8 @@
 
 import os from 'node:os'
 import https from 'node:https'
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { localCandidates, pairUrl } from '../lib/pair-util.js'
 
@@ -81,12 +83,52 @@ async function panel(action, extra = {}) {
   return { status: res.status, body, text }
 }
 
+// The local-admin grant: loopback alone stopped being proof on 2026-09-28,
+// because a tunnel agent (frpc / cloudflared / ngrok) dials the gateway from
+// 127.0.0.1 on behalf of the internet. The secret is read from the same file
+// the plugin writes, so these checks prove the door really is shut for a
+// caller that only *looks* local.
+const dshHome = process.env.DSH_HOME || join(os.homedir(), '.dsh')
+const adminStoreFile = join(dshHome, 'storages', 'kita-dsh-gateway-admin.json')
+if (!existsSync(adminStoreFile)) {
+  console.error('no local-admin store at ' + adminStoreFile)
+  console.error('the running gateway predates the admin grant: restart dsh web after deploying the plugin')
+  process.exit(2)
+}
+const adminSecret = JSON.parse(readFileSync(adminStoreFile, 'utf8')).secret
+const ADMIN_COOKIE = 'kita_gw_admin=' + adminSecret
+
+/** Loopback request that carries the grant — a browser on this machine. */
+async function localFetch(path, options = {}) {
+  const res = await fetch(GATEWAY + path, {
+    method: options.method ?? 'GET',
+    headers: { Cookie: ADMIN_COOKIE, ...(options.headers ?? {}) },
+    redirect: 'manual',
+  })
+  const text = await res.text()
+  return { status: res.status, headers: res.headers, text }
+}
 // ---------------------------------------------------------------------------
 console.log('\n[1] the pairing page: QR for this machine, never for a remote one')
-const localPage = await fetch(`${GATEWAY}/gateway-pair`)
+// Loopback WITHOUT the grant is the tunnel case: this is byte-for-byte what
+// sakurafrp / cloudflared / ngrok hand over for an internet visitor.
+const barePage = await fetch(GATEWAY + '/gateway-pair')
+const bareHtml = await barePage.text()
+check('a loopback page without the grant returns 200', barePage.status === 200, 'status=' + barePage.status)
+check('a loopback page without the grant hides the QR card',
+  bareHtml.includes('KITA_LOCAL = false') && bareHtml.includes('KITA_LOCKED = true'))
+check('a loopback page without the grant carries no pairing link',
+  !bareHtml.includes('/gateway-pair#k='), 'found a fragment link without the grant')
+const bareQr = await fetch(GATEWAY + '/gateway-pair/qr.json')
+check('qr.json without the grant is 404', bareQr.status === 404, 'status=' + bareQr.status)
+const bareAdmin = await fetch(GATEWAY + '/admin/code')
+check('the admin surface without the grant is refused', bareAdmin.status === 403, 'status=' + bareAdmin.status)
+
+const localPage = await localFetch('/gateway-pair')
 const localHtml = await localPage.text()
-check('local page returns 200', localPage.status === 200, `status=${localPage.status}`)
-check('local page renders the QR card', localHtml.includes('id="localcard"') && localHtml.includes('KITA_LOCAL = true'))
+check('the granted local page returns 200', localPage.status === 200, 'status=' + localPage.status)
+check('the granted local page renders the QR card',
+  localHtml.includes('localcard') && localHtml.includes('KITA_LOCAL = true'))
 check('local page reads the code from the fragment', localHtml.includes('k=(\\d{6})'))
 
 const remotePage = await viaGateway('/gateway-pair')
@@ -95,9 +137,10 @@ check('remote page hides the QR card', remotePage.text.includes('KITA_LOCAL = fa
 check('remote page does not contain a pairing link',
   !remotePage.text.includes('/gateway-pair#k='), 'found a fragment link in a remote page')
 
-const qrLocal = await fetch(`${GATEWAY}/gateway-pair/qr.json`)
-const qrPayload = await qrLocal.json().catch(() => null)
-check('local qr.json returns 200', qrLocal.status === 200, `status=${qrLocal.status}`)
+const qrLocal = await localFetch('/gateway-pair/qr.json')
+let qrPayload = null
+try { qrPayload = JSON.parse(qrLocal.text) } catch { /* left null */ }
+check('local qr.json returns 200 with the grant', qrLocal.status === 200, 'status=' + qrLocal.status)
 check('qr.json carries the LAN url with the code in the fragment',
   typeof qrPayload?.url === 'string' && /\/gateway-pair#k=\d{6}$/.test(qrPayload.url), JSON.stringify(qrPayload?.url))
 check('qr.json carries rendered SVG', typeof qrPayload?.svg === 'string' && qrPayload.svg.startsWith('<svg '))

@@ -389,6 +389,48 @@ console.log('\n[7] credential store')
 }
 
 // ---------------------------------------------------------------------------
+console.log('\n[8] the local-admin grant')
+{
+  const {
+    ADMIN_COOKIE,
+    ADMIN_QUERY,
+    adminEntryHintPath,
+    adminEntryUrl,
+    adminGrantCookie,
+    adminSecretMatches,
+    loadAdminSecret,
+    newAdminSecret,
+  } = await import('../lib/local-admin.js')
+  const adminTmp = mkdtempSync(join(tmpdir(), 'kita-gw-admin-'))
+  try {
+    const file = join(adminTmp, 'kita-dsh-gateway-admin.json')
+    const first = loadAdminSecret(file)
+    check('a first boot mints a 32-byte hex secret',
+      /^[0-9a-f]{64}$/.test(first.secret) && first.created === true && first.source === 'generated')
+    const second = loadAdminSecret(file)
+    equal('a reload reuses the stored secret', second.secret, first.secret)
+    equal('a reload reports the file as its source', second.source, 'file')
+    equal('a configured secret wins over the file', loadAdminSecret(file, 'pinned').secret, 'pinned')
+    check('two mints never collide', newAdminSecret() !== newAdminSecret())
+    check('an empty presented value never matches', adminSecretMatches('', first.secret) === false)
+    check('a missing secret never matches', adminSecretMatches(first.secret, '') === false)
+    check('the right secret matches', adminSecretMatches(first.secret, first.secret) === true)
+    const flipped = (first.secret[0] === 'a' ? 'b' : 'a') + first.secret.slice(1)
+    check('a tampered secret does not match', adminSecretMatches(flipped, first.secret) === false)
+    check('the entry url carries the grant as ?a=',
+      adminEntryUrl(3081, 'grant').includes(`/gateway-pair?${ADMIN_QUERY}=grant`))
+    check('the grant cookie is HttpOnly and SameSite=Strict',
+      adminGrantCookie('grant').startsWith(`${ADMIN_COOKIE}=grant;`)
+      && adminGrantCookie('grant').includes('HttpOnly')
+      && adminGrantCookie('grant').includes('SameSite=Strict'))
+    check('the hint file sits next to the store',
+      adminEntryHintPath(file).endsWith('kita-dsh-gateway-admin-url.txt'))
+  } finally {
+    rmSync(adminTmp, { recursive: true, force: true })
+  }
+}
+
+// ---------------------------------------------------------------------------
 console.log(`\n${failures.length === 0 ? 'ALL PASS' : 'FAILURES'}: ${passed} passed, ${failures.length} failed`)
 if (failures.length > 0) {
   for (const failure of failures) console.log(`  - ${failure}`)

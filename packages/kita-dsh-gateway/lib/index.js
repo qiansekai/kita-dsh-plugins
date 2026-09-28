@@ -42,6 +42,16 @@ import {
   pruneExpired,
   saveStore,
 } from './token-store.js'
+import {
+  ADMIN_COOKIE,
+  ADMIN_QUERY,
+  adminEntryUrl,
+  adminEntryHintPath,
+  adminGrantCookie,
+  adminSecretMatches,
+  loadAdminSecret,
+  writeAdminEntryHint,
+} from './local-admin.js'
 import { createTunnel, resolveCloudflared } from './tunnel.js'
 
 export const name = 'kita-dsh-gateway'
@@ -73,6 +83,12 @@ export const Config = z.object({
   tunnelProtocol: z.union(['auto', 'http2', 'quic']).default('http2'),
   /** How long a `tunnel-start` request waits for the public URL. */
   tunnelStartTimeoutMs: z.natural().max(120000).default(25000),
+  /**
+   * Pin the local-admin secret instead of letting the gateway mint one into
+   * `<DSH_HOME>/storages/kita-dsh-gateway-admin.json`. A deployment value;
+   * empty (the default) means "read the file, mint on first boot".
+   */
+  adminToken: z.string().default(''),
 })
 
 const COOKIE_NAME = 'kita_gw'
@@ -102,6 +118,16 @@ const timingSafeEqual = (a, b) => crypto.timingSafeEqual(sha256(String(a)), sha2
 function storagePath() {
   const home = process.env.DSH_HOME || join(homedir(), '.dsh')
   return join(home, 'storages', 'kita-dsh-gateway-tokens.json')
+}
+
+/**
+ * Where the local-admin secret lives. Separate from the token store on
+ * purpose: rotating one must never disturb the other, and the file is the one
+ * thing a tunnel cannot read.
+ */
+function adminStoragePath() {
+  const home = process.env.DSH_HOME || join(homedir(), '.dsh')
+  return join(home, 'storages', 'kita-dsh-gateway-admin.json')
 }
 
 /**
@@ -263,17 +289,22 @@ function proxyWs(req, socket, head, targetPort) {
 /**
  * The pairing page served on the gateway port.
  *
- * `local === true` when the page is open on this machine itself — then, and
- * only then, it renders the QR that carries the code plus a poller that keeps
- * that QR in step with the rotation. A phone (or anyone else on the LAN, or
- * through the tunnel) gets the plain six-digit form: rendering the code into a
- * page any LAN neighbour can load would hand out the pairing code itself, and
- * that code is the entire authentication.
+ * `local === true` only when the page is open on this machine AND the browser
+ * carries the local-admin grant — then, and only then, it renders the QR that
+ * carries the code plus a poller that keeps that QR in step with the rotation.
+ * A phone, a LAN neighbour and a tunnel visitor all get the plain six-digit
+ * form: rendering the code into a page anyone can load would hand out the
+ * pairing code itself, and that code is the entire authentication.
+ *
+ * `locked === true` is the in-between case: a loopback caller whose browser has
+ * not picked up the grant yet (fresh profile, cleared cookies, or the very first
+ * visit after the secret was minted). It is told where the entry link lives
+ * instead of being shown a code it may not see.
  *
  * A scanned link carries the code in the fragment and the page submits it on
  * its own, so scanning means being paired — no typing.
  */
-const pairPage = (local, paired = false) => `<!doctype html>
+const pairPage = (local, paired = false, locked = false) => `<!doctype html>
 <html lang="zh">
 <head>
 <meta charset="utf-8">
@@ -324,6 +355,10 @@ const pairPage = (local, paired = false) => `<!doctype html>
       <div class="qrurl" id="qrurl"></div>
       <div class="cap">这个二维码只在电脑本机打开本页时出现</div>
     </div>
+    <div class="card" id="lockedcard" style="display:none">
+      <h1>本机管理面需要授权</h1>
+      <p>这个请求来自本机，但浏览器还没有拿到本机管理令牌。在电脑上打开 <code>storages/kita-dsh-gateway-admin-url.txt</code> 里的链接一次即可（dsh 启动日志打印了同一行；手机与隧道访客拿不到它）。</p>
+    </div>
   </div>
 <script>
 const KITA_LOCAL = ${local ? 'true' : 'false'}
@@ -331,6 +366,7 @@ const KITA_PAIRED = ${paired ? 'true' : 'false'}
 const go = document.getElementById('go')
 const code = document.getElementById('code')
 const err = document.getElementById('err')
+const KITA_LOCKED = ${locked ? 'true' : 'false'}
 let autoPair = false
 code.addEventListener('input', () => { err.textContent = '' })
 code.addEventListener('keydown', (e) => { if (e.key === 'Enter') pair() })
@@ -390,6 +426,9 @@ if (KITA_LOCAL) {
 if (KITA_PAIRED) {
   document.getElementById('pairedcard').style.display = 'block'
   document.getElementById('paircard').style.display = 'none'
+}
+if (KITA_LOCKED) {
+  document.getElementById('lockedcard').style.display = 'block'
 }
 </script>
 </body>
@@ -532,6 +571,39 @@ async function refresh() {
 refresh()
 setInterval(refresh, 5000)
 </script>
+</body>
+</html>`
+
+/**
+ * Shown to a loopback browser that has not picked the admin grant up yet.
+ * Remote callers never see it: they are answered with a bare 404, so the
+ * existence of the local surface is not advertised to a tunnel visitor.
+ */
+const adminLockedPage = (hintPath) => `<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>本机管理入口 · dsh</title>
+<style>
+  html,body{height:100%;margin:0}
+  body{display:flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif;
+       background:#0f1115;color:#e8eaed}
+  .card{width:min(420px,88vw);background:#1a1d24;border:1px solid #2a2e38;border-radius:16px;
+        padding:26px 24px}
+  h1{font-size:17px;font-weight:600;margin:0 0 10px}
+  p{font-size:13px;color:#9aa3b2;line-height:1.7;margin:0 0 12px}
+  code{background:#0f1115;border:1px solid #2a2e38;border-radius:6px;padding:2px 6px;font-size:12px}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>本机管理面需要授权</h1>
+    <p>这个请求来自本机，但浏览器还没有拿到本机管理令牌。配对码、二维码与设备吊销都只对持有该令牌的浏览器开放，这样任何隧道（frp / cloudflared / ngrok）都无法把这些内容带走。</p>
+    <p>在电脑上打开下面文件里的链接一次即可（dsh 启动日志里也打印了同一行）：</p>
+    <p><code>${hintPath}</code></p>
+    <p>链路只在本机 loopback 上生效：链接被复制到别的机器打不开任何东西。</p>
+  </div>
 </body>
 </html>`
 
@@ -782,6 +854,16 @@ export function apply(ctx, config) {
     console.log(`[kita-dsh-gateway] 一键 Cloudflare 隧道就绪：${cloudflared}`)
   }
 
+  /**
+   * The local-admin secret. Minted on first boot into <DSH_HOME>/storages/
+   * and reused after that, so a browser only has to be handed the entry link
+   * once. Never logged by value in the pairing path, never sent to a phone.
+   */
+  const adminFile = adminStoragePath()
+  const admin = loadAdminSecret(adminFile, config?.adminToken ?? '')
+  const adminSecret = admin.secret
+  const adminHintFile = adminEntryHintPath(adminFile)
+
   const store = loadStore(storagePath())
   const tokens = store.tokens
   let currentCode = store.currentCode ?? newCode()
@@ -827,6 +909,24 @@ export function apply(ctx, config) {
   const isLoopback = (req) => {
     if (typeof req.headers['cf-connecting-ip'] === 'string' && req.headers['cf-connecting-ip'] !== '') return false
     return isLoopbackPeer(req)
+  }
+
+  /**
+   * True when the caller proved it holds this machine's admin secret.
+   *
+   * Loopback alone is NOT proof, and that is exactly the bug this closes: every
+   * tunnel agent (frpc, cloudflared, ngrok) dials the gateway from 127.0.0.1 on
+   * behalf of the internet, so a public request and a browser request are
+   * indistinguishable at the socket. The secret lives in a file only this
+   * machine can read, so a tunnel can neither present it nor read it.
+   *
+   * Both conditions matter: the grant keeps an unknown tunnel out, and loopback
+   * keeps a leaked ?a= link from working anywhere else.
+   */
+  const isLocalAdmin = (req) => {
+    if (!isLoopback(req)) return false
+    const value = parseCookies(req.headers.cookie)[ADMIN_COOKIE]
+    return adminSecretMatches(typeof value === 'string' ? value : '', adminSecret)
   }
 
   /** Addresses of recently active paired devices, best guess for "phone's /24". */
@@ -1003,19 +1103,43 @@ export function apply(ctx, config) {
   }
 
   const server = http.createServer((req, res) => {
+    let url = null
     let pathname = '/'
-    try { pathname = new URL(req.url, 'http://x').pathname } catch { /* keep '/' */ }
+    try {
+      url = new URL(req.url, 'http://x')
+      pathname = url.pathname
+    } catch { /* keep '/' */ }
+    // One-time handover of the local-admin grant. The URL printed at boot (and
+    // kept in <storages>/kita-dsh-gateway-admin-url.txt) carries the secret as
+    // ?a=...; opening it here trades the secret for a cookie and drops it from
+    // the address bar, so the long-lived form is never the one in a screenshot.
+    // Loopback is required as well: a leaked link must not work remotely.
+    if (req.method === 'GET' && url !== null) {
+      const presented = url.searchParams.get(ADMIN_QUERY) ?? ''
+      if (isLoopback(req) && adminSecretMatches(presented, adminSecret)) {
+        url.searchParams.delete(ADMIN_QUERY)
+        res.writeHead(302, {
+          'Set-Cookie': adminGrantCookie(adminSecret),
+          'Cache-Control': 'no-store',
+          Location: url.pathname + url.search,
+        })
+        res.end()
+        return
+      }
+    }
     if (req.method === 'POST' && pathname === '/pair') { handlePair(req, res); return }
     if (req.method === 'GET' && pathname === '/gateway-pair') {
       // The QR block (and the code it carries) appears only for a page opened
-      // on this machine; a phone, a LAN neighbour or a tunnel visitor gets the
-      // plain form.
+      // on this machine by a browser that holds the admin grant. A phone, a LAN
+      // neighbour and a tunnel visitor get the plain form; a local browser that
+      // has not picked the grant up yet is told where the entry link lives.
+      const local = isLocalAdmin(req)
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
-      res.end(pairPage(isLoopback(req), isAuthed(req, tokens) !== null))
+      res.end(pairPage(local, isAuthed(req, tokens) !== null, isLoopback(req) && !local))
       return
     }
     if (req.method === 'GET' && pathname === '/gateway-pair/qr.json') {
-      if (!isLoopback(req)) {
+      if (!isLocalAdmin(req)) {
         res.writeHead(404)
         res.end()
         return
@@ -1024,11 +1148,17 @@ export function apply(ctx, config) {
       res.end(JSON.stringify(pairingQr()))
       return
     }
-    // Admin surface: loopback only (a remote client must already be paired).
+    // Admin surface: this machine, with the grant. A tunnel of any kind dials
+    // in from loopback, so the grant — not the socket — is what decides here.
     if (pathname.startsWith('/admin')) {
-      if (!isLoopback(req)) {
-        res.writeHead(404)
-        res.end()
+      if (!isLocalAdmin(req)) {
+        if (!isLoopback(req)) {
+          res.writeHead(404)
+          res.end()
+          return
+        }
+        res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
+        res.end(adminLockedPage(adminHintFile))
         return
       }
       if (req.method === 'GET' && pathname === '/admin') {
@@ -1147,6 +1277,11 @@ export function apply(ctx, config) {
     server.listen(port, '0.0.0.0', () => {
       console.log(`[kita-dsh-gateway] 网关已启动 http://0.0.0.0:${port} → 127.0.0.1:${targetPort}`)
       printCode()
+      // The operator has to be handed the grant once, and a log line plus a file
+      // is the only channel a tunnel cannot read. Both carry the same URL.
+      const adminEntry = adminEntryUrl(port, adminSecret)
+      writeAdminEntryHint(adminHintFile, adminEntry)
+      console.log(`[kita-dsh-gateway] 本机管理入口（本机打开一次即可授权）${adminEntry}`)
       // A previously started tunnel pointed at this port; if it is somehow
       // still running (a reload that missed the teardown), keep it as is.
       if (tunnel.state().phase === 'running') {
