@@ -17,6 +17,7 @@
 | [`packages/kita-office-preview`](packages/kita-office-preview) | kita-office-preview | 右侧栏 Office 文件预览：Word / Excel / PowerPoint（docx / xlsx / pptx），用官方 `documentPreviews` 扩展点认领官方硬编码为「不可预览」的这批后缀 | client |
 | [`packages/kita-channel-balance`](packages/kita-channel-balance) | kita-channel-balance | composer 工具行常驻渠道余额：官方 DeepSeek 读平台钱包（退路 `/user/balance`），其余渠道自动探测 new-api / one-api / Moonshot / credit_grants 计费端点 | host + client |
 | [`packages/kita-terminal-autoscroll`](packages/kita-terminal-autoscroll) | kita-terminal-autoscroll | 终端输出区贴底自动跟随（后台任务 Jobs 菜单 + 会话内工具卡片）：新输出即滚到底，用户上滚暂停、滚回底部恢复；命令 banner 不受影响 | client |
+| [`packages/kita-force-steer`](packages/kita-force-steer) | kita-force-steer | composer「强制插话」按钮：先 `cancel` 打断当前 turn（abort 传到正在跑的工具，PTC runtime 直接杀 node 子进程），再把草稿以 `steer` 投递 —— 官方插话只在 step 边界被领取，长工具跑着时要等它结束 | client |
 | [`packages/dsh-quota-retry`](packages/dsh-quota-retry) | @dsh-external/dsh-quota-retry | 额度不足（QUOTA）无界长退避 + 鉴权失败（AUTH）有界短退避的自动重试 | host |
 
 ## 安全警告（重要）
