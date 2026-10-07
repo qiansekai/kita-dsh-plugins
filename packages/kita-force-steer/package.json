@@ -1,0 +1,29 @@
+{
+  "name": "kita-force-steer",
+  "version": "1.0.0",
+  "description": "One-gesture force steer in the composer: cancel the running turn (aborting the in-flight tool) and hand it the draft as steering, instead of waiting for the next step boundary.",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  },
+  "files": [
+    "lib",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {},
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "license": "MIT"
+}
