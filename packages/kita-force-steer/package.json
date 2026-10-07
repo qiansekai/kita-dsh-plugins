@@ -1,7 +1,7 @@
 {
   "name": "kita-force-steer",
-  "version": "1.0.0",
-  "description": "One-gesture force steer in the composer: cancel the running turn (aborting the in-flight tool) and hand it the draft as steering, instead of waiting for the next step boundary.",
+  "version": "1.1.0",
+  "description": "Busy submissions interrupt by default: plain Enter and the composer send button are captured at the document boundary, the running turn is cancelled (aborting the in-flight tool) and the draft goes out as steering instead of waiting for the next step boundary. Cmd/Ctrl+Enter keeps the official opposite mode. Headless, no UI.",
   "private": true,
   "type": "module",
   "main": "lib/index.js",

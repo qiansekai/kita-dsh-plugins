@@ -2,8 +2,8 @@
  * Offline verification for the kita-force-steer client half.
  *
  * Loads lib/client.js through a stubbed ModuleLoader (no browser, no dsh), then
- * asserts the slot registration, the cancel/steer verb wiring, and the button's
- * interaction policy. Run: node scripts/verify-client.mjs
+ * asserts the slot registration, the cancel/steer verb wiring, and the busy
+ * submission gesture policy. Run: node scripts/verify-client.mjs
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -29,10 +29,24 @@ new Function('window', source)(windowStub);
 check('module form: window.__ModuleLoader__.load called', definition !== null);
 check('module id is kita-force-steer', definition?.id === 'kita-force-steer');
 
+// ---- 2. browser stubs ---------------------------------------------------------------
+const listeners = { keydown: [], click: [] };
+let menuOpen = false;
+globalThis.document = {
+	addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+	removeEventListener(type, fn) {
+		const list = listeners[type] || [];
+		const index = list.indexOf(fn);
+		if (index >= 0) list.splice(index, 1);
+	},
+	querySelector() { return menuOpen ? { role: 'listbox' } : null; }
+};
+
 const reactStub = {
 	createElement: (type, props, children) => ({ type, props, children }),
 	useRef: (initial) => ({ current: initial }),
-	useCallback: (fn) => fn
+	useCallback: (fn) => fn,
+	useEffect: (fn) => { const cleanup = fn(); return cleanup; }
 };
 const mod = definition.factory((name) => {
 	if (name === 'react') return reactStub;
@@ -43,7 +57,7 @@ check('exports.inject declares slots + sessions',
 	Array.isArray(mod.inject) && mod.inject.includes('slots') && mod.inject.includes('sessions'),
 	JSON.stringify(mod.inject));
 
-// ---- 2. fake client services --------------------------------------------------------
+// ---- 3. fake client services --------------------------------------------------------
 const calls = [];
 function makeSession() {
 	return {
@@ -79,7 +93,7 @@ const injected = registration?.options?.inject?.();
 check('inject face exposes cancel + steer',
 	typeof injected?.forceSteer?.cancel === 'function' && typeof injected?.forceSteer?.steer === 'function');
 
-// ---- 3. business verbs --------------------------------------------------------------
+// ---- 4. business verbs --------------------------------------------------------------
 calls.length = 0;
 injected.forceSteer.cancel('S1');
 check('cancel reaches SessionFace.cancel()', calls.some((c) => c.kind === 'cancel'));
@@ -100,57 +114,146 @@ check('steer prompts with mode=steer and the echo identity',
 check('steer on an unmaterialized session returns false',
 	(await injected.forceSteer.steer('missing', 'x')) === false);
 
-// ---- 4. button policy ---------------------------------------------------------------
-function renderButton(overrides) {
+// ---- 5. busy submission gesture policy ----------------------------------------------
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+function mountGesture(overrides) {
+	listeners.keydown.length = 0;
+	listeners.click.length = 0;
 	const props = {
 		sessionId: 'S1',
 		forceSteer: injected.forceSteer,
-		inputActions: { setDraft: (t) => calls.push({ kind: 'setDraft', text: t }), submit: () => calls.push({ kind: 'submit' }) },
+		inputActions: {
+			setDraft: (text) => calls.push({ kind: 'setDraft', text }),
+			submit: () => calls.push({ kind: 'submit' })
+		},
 		useInput: (selector) => selector({ draft: '', phase: 'plain', attachmentIds: [] }),
 		useSession: (selector) => selector({ running: true, removed: false }),
 		...overrides
 	};
-	const element = registration.component(props);
-	return element;
+	return registration.component(props);
 }
 
-// running + empty draft -> interrupt only
-calls.length = 0;
-let button = renderButton({});
-button.props.onClick();
-check('empty draft: still interrupts', calls.some((c) => c.kind === 'cancel'));
-check('empty draft: sends nothing', !calls.some((c) => c.kind === 'prompt' || c.kind === 'submit'));
-check('empty draft label is 打断', button.children[1].children === '打断');
+function keyEvent(overrides) {
+	const event = {
+		key: 'Enter', shiftKey: false, altKey: false, ctrlKey: false, metaKey: false, isComposing: false,
+		defaultPrevented: false, propagationStopped: false, immediateStopped: false,
+		preventDefault() { this.defaultPrevented = true; },
+		stopPropagation() { this.propagationStopped = true; },
+		stopImmediatePropagation() { this.immediateStopped = true; }
+	};
+	return Object.assign(event, overrides);
+}
+function clickEvent(kind) {
+	const card = { contains: () => true };
+	const primary = { kind: 'primary' };
+	return {
+		defaultPrevented: false, propagationStopped: false,
+		preventDefault() { this.defaultPrevented = true; },
+		stopPropagation() { this.propagationStopped = true; },
+		stopImmediatePropagation() {},
+		target: {
+			closest(selector) {
+				if (selector === '[data-composer-card]') return card;
+				if (selector === '[class*="_primary"]') return kind === 'send' ? primary : null;
+				return null;
+			}
+		}
+	};
+}
+function dispatch(type, event) {
+	for (const fn of listeners[type]) fn(event);
+}
+const withDraft = (draft, attachmentIds = []) => (selector) => selector({ draft, phase: 'plain', attachmentIds });
 
-// running + text draft -> cancel then steer, then clear
+// headless: no DOM of its own
+check('renders nothing (headless interceptor)', mountGesture({ useInput: withDraft('hi') }) === null);
+
+// idle session -> the official path keeps the gesture
+menuOpen = false;
+mountGesture({ useSession: (selector) => selector({ running: false, removed: false }), useInput: withDraft('hi') });
 calls.length = 0;
-button = renderButton({ useInput: (selector) => selector({ draft: 'switch to plan B', phase: 'plain', attachmentIds: [] }) });
-button.props.onClick();
-await new Promise((resolve) => setTimeout(resolve, 0));
+let event = keyEvent({});
+dispatch('keydown', event);
+check('idle session: Enter is not swallowed', event.defaultPrevented === false);
+check('idle session: Enter does not interrupt', !calls.some((c) => c.kind === 'cancel'));
+
+// running + text draft -> interrupt first, then steer, then clear
+mountGesture({ useInput: withDraft('switch to plan B') });
+calls.length = 0;
+event = keyEvent({});
+dispatch('keydown', event);
+await tick();
 const order = calls.map((c) => c.kind);
-check('text draft: cancel happens before the prompt', order.indexOf('cancel') >= 0 && order.indexOf('cancel') < order.indexOf('prompt'),
+check('busy Enter: gesture swallowed at the document boundary',
+	event.defaultPrevented === true && event.propagationStopped === true && event.immediateStopped === true);
+check('busy Enter: cancel precedes the steering prompt',
+	order.includes('cancel') && order.includes('prompt') && order.indexOf('cancel') < order.indexOf('prompt'),
 	order.join(','));
-check('text draft: draft cleared after acceptance', calls.some((c) => c.kind === 'setDraft' && c.text === ''));
-check('text draft label is 插话', button.children[1].children === '插话');
-check('text draft marks the button armed', String(button.props.className).includes('kitaForceSteer_armed'));
+check('busy Enter: draft cleared after acceptance', calls.some((c) => c.kind === 'setDraft' && c.text === ''));
 
 // running + attachments -> official submit machine (file receipts stay official)
+mountGesture({ useInput: withDraft('', ['a']) });
 calls.length = 0;
-button = renderButton({ useInput: (selector) => selector({ draft: '', phase: 'plain', attachmentIds: ['a'] }) });
-button.props.onClick();
-await new Promise((resolve) => setTimeout(resolve, 0));
-check('attachments: delegates to official submit()', calls.some((c) => c.kind === 'submit'));
+event = keyEvent({});
+dispatch('keydown', event);
+await tick();
+check('attachments: interrupts then delegates to official submit()',
+	calls.some((c) => c.kind === 'cancel') && calls.some((c) => c.kind === 'submit'));
 
-// not running -> disabled
-button = renderButton({ useSession: (selector) => selector({ running: false, removed: false }) });
-check('idle session: button disabled', button.props.disabled === true);
+// releases: Shift/accelerated/IME, open candidate menu, empty draft, busy machine
+mountGesture({ useInput: withDraft('hi') });
+for (const [name, overrides] of [
+	['Shift+Enter is a line break', { shiftKey: true }],
+	['Cmd/Ctrl+Enter keeps the official opposite mode', { ctrlKey: true }],
+	['Meta+Enter keeps the official opposite mode', { metaKey: true }],
+	['IME composition is left alone', { isComposing: true }],
+	['other keys are left alone', { key: 'a' }]
+]) {
+	calls.length = 0;
+	event = keyEvent(overrides);
+	dispatch('keydown', event);
+	check(name, event.defaultPrevented === false && calls.length === 0);
+}
+menuOpen = true;
 calls.length = 0;
-button.props.onClick();
-check('idle session: click does nothing', calls.length === 0);
+event = keyEvent({});
+dispatch('keydown', event);
+check('open slash/at menu owns Enter', event.defaultPrevented === false && calls.length === 0);
+menuOpen = false;
+mountGesture({ useInput: withDraft('') });
+calls.length = 0;
+event = keyEvent({});
+dispatch('keydown', event);
+check('empty draft never interrupts', event.defaultPrevented === false && calls.length === 0);
+mountGesture({ useInput: (selector) => selector({ draft: 'x', phase: 'submitting', attachmentIds: [] }) });
+calls.length = 0;
+event = keyEvent({});
+dispatch('keydown', event);
+check('submit machine busy: gesture left to the official bar', event.defaultPrevented === false && calls.length === 0);
+mountGesture({ useSession: (selector) => selector({ running: true, removed: true }), useInput: withDraft('hi') });
+calls.length = 0;
+event = keyEvent({});
+dispatch('keydown', event);
+check('removed session: gesture left alone', event.defaultPrevented === false && calls.length === 0);
 
-// machine busy -> disabled
-button = renderButton({ useInput: (selector) => selector({ draft: 'x', phase: 'submitting', attachmentIds: [] }) });
-check('submit machine busy: button disabled', button.props.disabled === true);
+// the primary Send button shares the plain-Enter semantics
+mountGesture({ useInput: withDraft('ship it') });
+calls.length = 0;
+let click = clickEvent('send');
+dispatch('click', click);
+await tick();
+check('Send button: click intercepted', click.defaultPrevented === true && click.propagationStopped === true);
+check('Send button: interrupts then steers',
+	calls.some((c) => c.kind === 'cancel') && calls.some((c) => c.kind === 'prompt'));
+calls.length = 0;
+click = clickEvent('other');
+dispatch('click', click);
+check('other composer controls are untouched', click.defaultPrevented === false && calls.length === 0);
+calls.length = 0;
+click = { ...clickEvent('send'), target: null };
+dispatch('click', click);
+check('a click without a DOM target is ignored', click.defaultPrevented === false && calls.length === 0);
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : '\n' + failures + ' CHECK(S) FAILED');
 process.exit(failures === 0 ? 0 : 1);
