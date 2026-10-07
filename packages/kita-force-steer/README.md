@@ -18,8 +18,33 @@
   PTC runtime 杀掉它的 node 子进程（`dsh-ptc-runtime-node` 的 abort 监听）。
 
 本插件把两者变成**忙时提交的默认语义**：agent 运行时，普通 Enter 与主发送按钮在 document 捕获阶段
-被接管 —— 先 cancel，再把草稿以 steer 投递。于是消息不再排在长工具后面，而是等被取消的活动收敛后
-立刻执行。
+被接管 —— **先 cancel，等它收敛（running 落 false）后，再把草稿交给官方提交机器**。于是消息不再排在
+长工具后面，而是等被取消的活动收敛后立刻执行。
+
+### 为什么投递必须用 queue、不能用 steer（2026-10-07 连修两轮）
+
+第一版把草稿用 `session.prompt(content, 'steer')` 直接发出去 → 用户报「有概率直接停止会话而不是插话」。
+第二版改成「等 cancel 收敛后再交给官方机器」→ 5 轮实测**仍然丢 1 轮**（等待窗口不可靠）。第三版才是对的。
+
+根因在 Host 侧的分支：
+
+```js
+// dsh-api-session-controller: prompt
+if (request.mode === "steer") agent.steer(message);   // next-STEP inbox
+else agent.followup(message);                          // next-TURN inbox
+```
+
+- **steer → next-step 收件箱**：只在一个**活着的 turn** 里、到 step 边界才被领取。先 cancel 再投递，
+  消息就落进一个**再也不会打开的 step 收件箱** → 静默消失 = 用户看到的"直接停止会话"。
+- **queue → next-turn 收件箱**：当前 turn 一结束就被消费 —— cancel 已收敛、还在收敛、甚至 cancel 失败，
+  都不影响送达。
+
+而且官方的 `resolveSubmitMode()` 是按**客户端缓存的 running** 决定模式的，它与 Host 侧 cancel 的落地之间
+存在窗口（实测：cancel 发出后 2 秒 running 仍未落，此时代官方机器就会选 steer，又踩回上面的坑）。
+
+所以最终实现**不等待、也不依赖官方解析**：纯文本固定以 `queue` 直发
+（`forceSteer.send(id, text, 'queue')`），附件仍交给官方提交机器、但只在 cancel 收敛后才交接。
+`agent.steer()` 这条路径在本插件里彻底不再使用。
 
 **不打断的退路照样留着**：`Cmd/Ctrl+Enter` 仍然走官方的 accelerated 手势（与 busyEnter 相反的
 投递模式；`busyEnter=steer` 时它就是「排队」）。
@@ -29,7 +54,7 @@
 | 情况 | 行为 |
 |---|---|
 | agent 未运行 | 完全不介入，官方提交照旧 |
-| 运行中 + 普通 Enter / 点发送按钮 | 打断 + 插话（纯文本直发；带附件交回官方提交机器） |
+| 运行中 + 普通 Enter / 点「插话发送」 | 打断 + 插话（纯文本立刻以 queue 投递；附件交给官方机器） |
 | 运行中 + Cmd/Ctrl+Enter | 不介入，官方「相反模式」（busyEnter=steer ⇒ 排队） |
 | 运行中 + 草稿为空 | 不介入（不会因为空 Enter 误打断） |
 | 斜杠 / @ 候选菜单打开 | Enter 归菜单，不介入 |
@@ -61,9 +86,11 @@ document 捕获监听。**只想打断不发送**用官方「停止生成」即�
 
 ## 限制
 
-- 纯文本草稿走 `session.prompt([text], 'steer')` 直发；**含附件时退回官方提交机器**（文件 receipt
-  与图片序列化只在官方实现里），此时投递模式受 `busyEnter` 设置影响（无论哪种模式，紧接着的 cancel
-  都保证它不必等当前 turn 跑完）。
+- 插话消息按 `queue` 语义作为**下一轮**进入对话，而不是塞进当前 turn 的 step 收件箱 —— 用户感知一致
+  （当前 turn 已被打断），但没有"消息插进正在跑的 step"这种更细的语义；这正是可靠性的代价。
+- **含附件的草稿**走官方 `inputActions.submit()`（文件 receipt 与图片序列化只在官方实现里），因此需要
+  等 cancel 收敛（上限 `CANCEL_SETTLE_TIMEOUT_MS = 2000`）后才交接，以避开官方按缓存 running 选 steer
+  的坑；这段窗口内如果是极端慢的收敛，消息仍会送达，只是可能作为排队项而不是立即插话。
 - `ctx.sessions.binding(id)` 无值时（会话未 materialize）不介入，不猜测。
 - 打断会中止当前 turn 与正在跑的工具（PTC 会杀掉 node 子进程），这是本插件的语义本身；
   不想中断就用 Cmd/Ctrl+Enter。

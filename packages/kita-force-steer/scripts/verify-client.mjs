@@ -90,8 +90,8 @@ check('registered into conversation.input.right', registration?.options?.name ==
 	registration?.options?.name);
 check('registration id is kita-force-steer', registration?.options?.id === 'kita-force-steer');
 const injected = registration?.options?.inject?.();
-check('inject face exposes cancel + steer',
-	typeof injected?.forceSteer?.cancel === 'function' && typeof injected?.forceSteer?.steer === 'function');
+check('inject face exposes cancel + send',
+	typeof injected?.forceSteer?.cancel === 'function' && typeof injected?.forceSteer?.send === 'function');
 
 // ---- 4. business verbs --------------------------------------------------------------
 calls.length = 0;
@@ -102,17 +102,19 @@ injected.forceSteer.cancel('missing');
 check('cancel on an unmaterialized session is a no-op', calls.length === 0);
 
 calls.length = 0;
-const steered = await injected.forceSteer.steer('S1', 'redirect now');
+const queued = await injected.forceSteer.send('S1', 'redirect now', 'queue');
 const begin = calls.find((c) => c.kind === 'beginSubmission');
 const prompt = calls.find((c) => c.kind === 'prompt');
-check('steer returns true when the Host accepts', steered === true);
-check('steer registers a local echo as steering', begin?.input?.mode === 'steer' && begin?.input?.text === 'redirect now',
-	JSON.stringify(begin?.input));
-check('steer prompts with mode=steer and the echo identity',
-	prompt?.mode === 'steer' && prompt?.requestId === 'req-1' &&
+check('send returns true when the Host accepts', queued === true);
+check('send registers a local echo with the requested mode',
+	begin?.input?.mode === 'queue' && begin?.input?.text === 'redirect now', JSON.stringify(begin?.input));
+check('send prompts with the requested mode and the echo identity',
+	prompt?.mode === 'queue' && prompt?.requestId === 'req-1' &&
 	Array.isArray(prompt?.content) && prompt.content[0]?.type === 'text' && prompt.content[0]?.text === 'redirect now');
-check('steer on an unmaterialized session returns false',
-	(await injected.forceSteer.steer('missing', 'x')) === false);
+check('send passes an explicit steer mode through too (not used by the gesture path)',
+	(await (async () => { calls.length = 0; const ok = await injected.forceSteer.send('S1', 'x', 'steer'); return ok && calls.find((c) => c.kind === 'prompt')?.mode === 'steer'; })()) === true);
+check('send on an unmaterialized session returns false',
+	(await injected.forceSteer.send('missing', 'x', 'queue')) === false);
 
 // ---- 5. busy submission gesture policy ----------------------------------------------
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -178,7 +180,13 @@ dispatch('keydown', event);
 check('idle session: Enter is not swallowed', event.defaultPrevented === false);
 check('idle session: Enter does not interrupt', !calls.some((c) => c.kind === 'cancel'));
 
-// running + text draft -> interrupt first, then steer, then clear
+// running + text draft -> interrupt first, then hand off to the OFFICIAL machine.
+// The clock is frozen so the settle wait resolves on its first poll instead of
+// costing CANCEL_SETTLE_TIMEOUT_MS per case.
+const realNow = Date.now;
+function freezeClock() { let t = 0; Date.now = () => (t += 5000); }
+function restoreClock() { Date.now = realNow; }
+
 mountGesture({ useInput: withDraft('switch to plan B') });
 calls.length = 0;
 event = keyEvent({});
@@ -187,19 +195,26 @@ await tick();
 const order = calls.map((c) => c.kind);
 check('busy Enter: gesture swallowed at the document boundary',
 	event.defaultPrevented === true && event.propagationStopped === true && event.immediateStopped === true);
-check('busy Enter: cancel precedes the steering prompt',
+check('busy Enter: cancel precedes the hand-off',
 	order.includes('cancel') && order.includes('prompt') && order.indexOf('cancel') < order.indexOf('prompt'),
 	order.join(','));
+check('busy Enter: plain text goes out as QUEUE, never as steer (the steer/cancel race drops the message)',
+	calls.find((c) => c.kind === 'prompt')?.mode === 'queue', order.join(','));
 check('busy Enter: draft cleared after acceptance', calls.some((c) => c.kind === 'setDraft' && c.text === ''));
 
-// running + attachments -> official submit machine (file receipts stay official)
+// running + attachments -> official machine, handed over only after the settle
+freezeClock();
 mountGesture({ useInput: withDraft('', ['a']) });
 calls.length = 0;
 event = keyEvent({});
 dispatch('keydown', event);
+const beforeSettle = calls.map((c) => c.kind);
+check('attachments: only the cancel is issued synchronously',
+	beforeSettle.includes('cancel') && !beforeSettle.includes('submit'), beforeSettle.join(','));
 await tick();
 check('attachments: interrupts then delegates to official submit()',
 	calls.some((c) => c.kind === 'cancel') && calls.some((c) => c.kind === 'submit'));
+restoreClock();
 
 // releases: Shift/accelerated/IME, open candidate menu, empty draft, busy machine
 mountGesture({ useInput: withDraft('hi') });
@@ -244,8 +259,8 @@ let click = clickEvent('send');
 dispatch('click', click);
 await tick();
 check('Send button: click intercepted', click.defaultPrevented === true && click.propagationStopped === true);
-check('Send button: interrupts then steers',
-	calls.some((c) => c.kind === 'cancel') && calls.some((c) => c.kind === 'prompt'));
+check('Send button: interrupts then hands off as queue',
+	calls.some((c) => c.kind === 'cancel') && calls.find((c) => c.kind === 'prompt')?.mode === 'queue');
 calls.length = 0;
 click = clickEvent('other');
 dispatch('click', click);

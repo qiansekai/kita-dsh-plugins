@@ -14,10 +14,14 @@
  * This half turns that pair into the DEFAULT reading of a busy submission:
  * while the addressed agent is running, plain Enter and the primary Send
  * button are captured at the document boundary, the turn is cancelled, and
- * the draft goes out as steering. The accelerated chord (Cmd/Ctrl+Enter)
- * is deliberately left alone, so the official "opposite mode" still gives
- * an uninterrupted path: with busyEnter=steer that chord queues instead of
- * interrupting.
+ * the draft goes out as a QUEUE item (next-turn inbox) so it is consumed no
+ * matter how the cancel and the prompt interleave. Steering (next-step inbox)
+ * is deliberately NOT used here: racing it against the cancel files the message
+ * into a turn that never reopens, and the message is silently dropped (see
+ * deliver()).
+ * The accelerated chord (Cmd/Ctrl+Enter) is deliberately left alone, so the
+ * official "opposite mode" still gives an uninterrupted path: with
+ * busyEnter=steer that chord queues instead of interrupting.
  *
  * Gestures that must keep working are released untouched:
  *  - the slash/at candidate menu owns Enter while it is open (role=listbox),
@@ -53,6 +57,10 @@ window.__ModuleLoader__.load({
 		const MENU_SELECTOR = "[data-composer-card] [role=\"listbox\"]";
 		/** Submit-machine phases that already own the gesture. */
 		const MACHINE_BUSY_PHASES = ["adjudicating", "submitting"];
+		/** How long to wait for the cancel to settle before handing the draft over. */
+		const CANCEL_SETTLE_TIMEOUT_MS = 2000;
+		/** Poll interval while waiting for the cancel to settle. */
+		const CANCEL_SETTLE_POLL_MS = 80;
 
 		/**
 		 * Stop one composer gesture before the official handler sees it.
@@ -91,28 +99,67 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
-		 * Cancel the running turn, then deliver the draft as steering.
+		 * Resolve once the predicate holds or the timeout elapses.
+		 * @param predicate - condition to poll.
+		 * @param timeoutMs - upper bound on the wait.
+		 */
+		function waitUntil(predicate, timeoutMs) {
+			return new Promise((resolve) => {
+				const deadline = Date.now() + timeoutMs;
+				const tick = () => {
+					if (predicate() || Date.now() >= deadline) {
+						resolve();
+						return;
+					}
+					setTimeout(tick, CANCEL_SETTLE_POLL_MS);
+				};
+				tick();
+			});
+		}
+
+		/**
+		 * Interrupt the running turn, then hand the draft to the OFFICIAL submit
+		 * machine once the cancel has settled.
+		 *
+		 * Do not hand-roll the steering prompt here. resolveSubmitMode() inside the
+		 * official bar resolves the delivery mode from the LIVE running flag
+		 * (queue whenever the agent is not running); a direct prompt(mode=steer)
+		 * skips that resolution and the Host then calls agent.steer(), which files
+		 * the message into the NEXT-STEP inbox. Cancelled first, that inbox belongs
+		 * to a turn that will never open again, so the message is dropped and the
+		 * session just looks stopped (field report 2026-10-07: "sometimes it stops
+		 * the session instead of steering"). Waiting for idle makes the official
+		 * machine pick queue, and a queued message always reaches the transcript.
+		 *
 		 * @param forceSteer - the cancel/steer business face.
 		 * @param sessionId - addressed session.
 		 * @param inputActions - the slot's composer actions (draft + official submit).
 		 * @param draft - draft text captured for this gesture.
 		 * @param attachmentCount - number of attachment drafts carried with the gesture.
-		 * @param readDraft - reads the current draft (settlement guard for clearing).
+		 * @param isIdle - reads whether the cancel has already settled (running false).
 		 */
-		function deliver(forceSteer, sessionId, inputActions, draft, attachmentCount, readDraft) {
-			// 1) Interrupt first: the Host keeps the inbox, so the message below
-			//    runs as soon as the aborted activity converges.
+		function deliver(forceSteer, sessionId, inputActions, draft, attachmentCount, isIdle, readDraft) {
+			// 1) Interrupt first: the Host keeps the inbox (cancel with keepInbox), so
+			//    anything already pending still resumes after the abort converges.
 			forceSteer.cancel(sessionId);
 			if (draft.trim() === "" && attachmentCount === 0) return;
-			// 2) Attachments need the official submit machine (file receipts and
-			//    image serialization live there); plain text goes straight out as
-			//    steering so it never depends on the busy-Enter preference.
+			// 2a) Attachments can only go through the official machine (file receipts
+			//     and image serialization live there). It resolves its own mode from
+			//     the live running flag, so hand over only after the cancel settles —
+			//     otherwise it would pick steer and repeat the dropped-message race.
 			if (attachmentCount > 0) {
-				inputActions.submit();
+				void waitUntil(isIdle, CANCEL_SETTLE_TIMEOUT_MS).then(() => {
+					inputActions.submit();
+				});
 				return;
 			}
+			// 2b) Plain text: send it as a QUEUE item right away. Queue reaches the
+			//     next-turn inbox, which the Host consumes whenever the current turn
+			//     ends — settled, still converging, or never cancelled at all. The old
+			//     path raced the cancel with a hand-rolled mode=steer prompt and lost
+			//     the message in roughly one round out of five (measured).
 			const submitted = draft;
-			void forceSteer.steer(sessionId, submitted).then((ok) => {
+			void forceSteer.send(sessionId, submitted, "queue").then((ok) => {
 				if (ok && readDraft() === submitted) inputActions.setDraft("");
 			});
 		}
@@ -156,7 +203,8 @@ window.__ModuleLoader__.load({
 				function claim(event) {
 					const now = latest.current;
 					swallow(event);
-					deliver(forceSteer, sessionId, inputActions, now.draft, now.attachmentCount, readDraft);
+					deliver(forceSteer, sessionId, inputActions, now.draft, now.attachmentCount,
+						() => latest.current.running === false, readDraft);
 				}
 				/**
 				 * Plain Enter submits. Shift+Enter is a line break, the accelerated
@@ -211,19 +259,29 @@ window.__ModuleLoader__.load({
 					void binding.session.cancel().catch(() => {});
 				},
 				/**
-				 * Admit one plain-text steering message with its local echo.
+				 * Admit one plain-text message with its local echo.
+				 *
+				 * The mode is explicit and load-bearing. The Host branches on it:
+				 * steer calls agent.steer() (NEXT-STEP inbox, only consumed while a
+				 * turn is live), queue calls agent.followup() (NEXT-TURN inbox,
+				 * consumed whenever the current turn ends). Interrupting therefore
+				 * has to hand the draft over as queue: a steer that races the cancel
+				 * lands in the inbox of a turn that will never reopen, and the
+				 * message is dropped (field report 2026-10-07: "sometimes it just
+				 * stops the session"). Queue is safe under both timings.
 				 * @param sessionId - addressed session.
 				 * @param text - draft text to send.
+				 * @param mode - queue (always consumed) or steer (live turn only).
 				 * @returns whether the Host accepted the prompt.
 				 */
-				async steer(sessionId, text) {
+				async send(sessionId, text, mode) {
 					const binding = bindingOf(sessionId);
 					if (binding === undefined) return false;
 					const session = binding.session;
-					const handle = session.beginSubmission({ mode: "steer", text, attachments: [] });
+					const handle = session.beginSubmission({ mode, text, attachments: [] });
 					let result;
 					try {
-						result = await session.prompt([{ type: "text", text }], "steer", undefined, handle.requestId);
+						result = await session.prompt([{ type: "text", text }], mode, undefined, handle.requestId);
 					} catch (error) {
 						handle.abandon();
 						return false;
