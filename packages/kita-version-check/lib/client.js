@@ -1,14 +1,18 @@
 /**
  * kita-version-check - client half.
  *
- * Two seats share one store:
- *   sidebar.footer.action  the version entry beside Settings (narrow = icon rail)
- *   shell.overlay          the detail panel: running version, registry channels,
- *                          the update verdict, and a manual refresh
+ * Two seats, one store, and NO sidebar-foot button: the footer row already
+ * belongs to one full-width action (the restart entry), so a second occupant
+ * there pushes it out of the 256px column. The entry therefore lives among the
+ * global panel icons (sidebar.panellist) and opens a main panel, which is the
+ * additive seat the sidebar reserves for exactly this kind of page.
  *
- * The host half owns every fact: the running version is resolved from the
- * process itself (never from this page), and the registry answer is cached so
- * opening the panel costs at most one request per refresh interval.
+ *   sidebar.panellist  the icon entry beside Plugins / Schedules
+ *   main               the version page itself, dispatched by the same id
+ *
+ * The host half owns every fact: the running version comes from the process,
+ * and the registry answer is cached so opening the page costs at most one
+ * request per refresh interval.
  *
  * This file is a client module-system CJS bundle: it must stay in the
  * "window.__ModuleLoader__.load({ id, factory })" form, with "require" as the
@@ -23,47 +27,29 @@ window.__ModuleLoader__.load({
 		Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
 		var react = require("react");
 
+		/** Panel id: the sidebar entry id and the main panel key are the same. */
+		const PANEL_ID = "kita-version-check";
+
 		// ---- Package-owned stylesheet (idempotent, framework-cleanup convention) ----
+		// Opaque only: a translucent surface over live content is what makes text
+		// unreadable. Every token below is from the documented theme directory.
 		const CSS = [
-			".kitaVersionBtn{display:inline-flex;align-items:center;gap:8px;box-sizing:border-box;",
-			"width:calc(100% + 4px);height:42px;margin:0 -2px;padding:0 10px 0 8px;",
-			"border:none;border-radius:12px;background:transparent;color:var(--dsw-alias-label-primary);",
-			"font-family:inherit;font-size:14px;cursor:pointer;overflow:hidden;flex:none;",
-			"transition:background-color .16s ease,color .16s ease}",
-			".kitaVersionBtn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}",
-			".kitaVersionBtn:hover{background:var(--dsw-alias-bg-layer-2)}",
-			".kitaVersionBtn_rail{width:36px;height:36px;margin:0;padding:0;border-radius:50%;justify-content:center;gap:0}",
-			".kitaVersionBtn_update{font-weight:500}",
-			".kitaVersionIcon{position:relative;display:inline-flex;flex:none}",
-			".kitaVersionDot{position:absolute;top:-2px;right:-3px;width:8px;height:8px;border-radius:50%;",
-			"background:var(--dsw-alias-state-warn-primary);box-shadow:0 0 0 2px var(--dsw-alias-bg-base)}",
-			".kitaVersionLabel{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
-			".kitaVersionOverlay{position:fixed;inset:0;z-index:60;pointer-events:auto;box-sizing:border-box;",
-			"display:flex;align-items:center;justify-content:center;padding:24px;animation:kitaVersionLayerIn .16s ease-out}",
-			".kitaVersionMask{position:absolute;inset:0;background:rgba(0,0,0,.62)}",
-			".kitaVersionCard{position:relative;z-index:1;box-sizing:border-box;width:400px;max-width:100%;",
-			"max-height:calc(100vh - 48px);overflow:auto;padding:16px 16px 12px;",
-			"background:var(--dsw-alias-bg-layer-1,var(--dsw-alias-bg-base));",
-			"border:1px solid var(--dsw-alias-border-l2);border-radius:12px;",
-			"box-shadow:0 10px 30px rgba(0,0,0,.22);color:var(--dsw-alias-label-primary);",
-			"font-family:inherit;font-size:13px;line-height:19px;",
-			"animation:kitaVersionCardIn .2s cubic-bezier(.16,1,.3,1)}",
-			"@keyframes kitaVersionLayerIn{from{opacity:0}to{opacity:1}}",
-			"@keyframes kitaVersionCardIn{from{opacity:0;transform:translateY(8px) scale(.97)}to{opacity:1;transform:none}}",
-			"@media (prefers-reduced-motion:reduce){.kitaVersionOverlay,.kitaVersionCard{animation:none}}",
-			".kitaVersionHead{display:flex;align-items:center;gap:8px;margin-bottom:12px}",
-			".kitaVersionTitle{font-size:14px;font-weight:500;line-height:20px;flex:1;min-width:0}",
-			".kitaVersionCurrent{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px;margin-bottom:8px}",
-			".kitaVersionCurrentValue{font-size:20px;font-weight:500;line-height:26px;letter-spacing:.2px;color:var(--dsw-alias-label-primary)}",
+			".kitaVersionPanel{box-sizing:border-box;width:100%;max-width:680px;margin:0 auto;",
+			"padding:28px 24px 32px;color:var(--dsw-alias-label-primary);",
+			"font-family:inherit;font-size:13px;line-height:19px}",
+			".kitaVersionPanelHead{display:flex;align-items:center;gap:12px;margin-bottom:16px}",
+			".kitaVersionPanelTitle{flex:1;min-width:0;font-size:16px;font-weight:500;line-height:24px}",
+			".kitaVersionCurrent{display:flex;align-items:baseline;flex-wrap:wrap;gap:10px;margin-bottom:10px}",
+			".kitaVersionCurrentValue{font-size:24px;font-weight:500;line-height:30px;letter-spacing:.2px}",
 			".kitaVersionMeta{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}",
-			".kitaVersionVerdict{margin:8px 0 12px;padding:8px 10px;border-radius:8px;",
+			".kitaVersionVerdict{margin:0 0 16px;padding:10px 12px;border-radius:8px;",
 			"border-left:3px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);",
-			"color:var(--dsw-alias-label-primary);font-size:12px;line-height:18px;word-break:break-word}",
+			"color:var(--dsw-alias-label-primary);font-size:13px;line-height:19px;word-break:break-word}",
 			".kitaVersionVerdict_new{border-left-color:var(--dsw-alias-state-warn-primary)}",
 			".kitaVersionVerdict_bad{border-left-color:var(--dsw-alias-state-error-primary)}",
-			".kitaVersionTable{display:flex;flex-direction:column;gap:2px;margin-bottom:10px}",
-			".kitaVersionRow{display:grid;grid-template-columns:56px 1fr auto auto;align-items:center;gap:8px;",
-			"padding:5px 8px;border-radius:7px;font-size:12px;line-height:18px}",
+			".kitaVersionTable{display:flex;flex-direction:column;gap:2px;margin-bottom:18px}",
+			".kitaVersionRow{display:grid;grid-template-columns:70px 1fr auto auto;align-items:center;gap:10px;",
+			"padding:7px 10px;border-radius:7px;font-size:12px;line-height:18px}",
 			".kitaVersionRow:nth-child(odd){background:var(--dsw-alias-bg-layer-2)}",
 			".kitaVersionTag{color:var(--dsw-alias-label-secondary);font-family:inherit}",
 			".kitaVersionVer{font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
@@ -72,12 +58,11 @@ window.__ModuleLoader__.load({
 			"border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base)}",
 			".kitaVersionPill_newer{border-color:var(--dsw-alias-state-warn-primary);color:var(--dsw-alias-label-primary);font-weight:500}",
 			".kitaVersionPill_equal{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary)}",
-			".kitaVersionSection{color:var(--dsw-alias-label-secondary);font-size:11px;line-height:17px;margin:0 0 4px 8px}",
-			".kitaVersionRecent{display:flex;flex-direction:column;gap:1px;margin-bottom:10px}",
-			".kitaVersionRecentRow{display:grid;grid-template-columns:1fr auto;gap:8px;padding:2px 8px;",
+			".kitaVersionSection{color:var(--dsw-alias-label-secondary);font-size:11px;line-height:17px;margin:0 0 6px 10px}",
+			".kitaVersionRecent{display:flex;flex-direction:column;gap:1px;margin-bottom:16px}",
+			".kitaVersionRecentRow{display:grid;grid-template-columns:1fr auto;gap:10px;padding:3px 10px;",
 			"font-size:11px;line-height:17px;color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums}",
-			".kitaVersionFoot{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:4px}",
-			".kitaVersionHint{color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px;flex:1;min-width:0}",
+			".kitaVersionHint{color:var(--dsw-alias-label-secondary);font-size:11px;line-height:17px;margin-top:2px}",
 			".kitaVersionActions{display:flex;gap:8px;flex:none}",
 			".kitaVersionAction{height:30px;padding:0 12px;border-radius:8px;cursor:pointer;font-family:inherit;font-size:13px;",
 			"border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);",
@@ -87,7 +72,10 @@ window.__ModuleLoader__.load({
 			".kitaVersionAction:disabled{opacity:.6;cursor:default}",
 			".kitaVersionAction:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}",
 			".kitaVersionAction_primary{background:var(--dsw-alias-brand-primary);border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-bg-base);font-weight:500}",
-			".kitaVersionAction_primary:hover{filter:brightness(1.08);background:var(--dsw-alias-brand-primary)}"
+			".kitaVersionAction_primary:hover{filter:brightness(1.08);background:var(--dsw-alias-brand-primary)}",
+			".kitaVersionIcon{position:relative;display:inline-flex;align-items:center;justify-content:center;flex:none}",
+			".kitaVersionDot{position:absolute;top:-1px;right:-1px;width:7px;height:7px;border-radius:50%;",
+			"background:var(--dsw-alias-state-warn-primary);box-shadow:0 0 0 2px var(--dsw-specific-sidebar-fill)}"
 		].join("");
 		const tagId = "kita-version-check/version.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId) + "]") === null) {
@@ -114,9 +102,9 @@ window.__ModuleLoader__.load({
 			return payload;
 		}
 
-		/** One store per plugin activation, handed to both seats through inject. */
+		/** One store per plugin activation, shared by the icon and the panel. */
 		function createStore() {
-			let state = { open: false, loading: false, payload: null, error: null };
+			let state = { loading: false, payload: null, error: null };
 			const listeners = new Set();
 			const emit = () => {
 				for (const listener of [...listeners]) {
@@ -147,16 +135,9 @@ window.__ModuleLoader__.load({
 					listeners.add(listener);
 					return () => listeners.delete(listener);
 				},
-				/** Warm the answer so the sidebar entry can show a version at once. */
+				/** Warm the answer so the icon can carry an update badge at once. */
 				prime() {
 					if (state.payload === null && !state.loading) void load(false);
-				},
-				open() {
-					set({ open: true });
-					if (state.payload === null && !state.loading) void load(false);
-				},
-				close() {
-					set({ open: false });
 				},
 				refresh() {
 					void load(true);
@@ -191,8 +172,6 @@ window.__ModuleLoader__.load({
 			if (newer.length === 0) return null;
 			let best = newer[0];
 			for (const channel of newer.slice(1)) {
-				// The host already ordered them by channel config; pick the highest
-				// version among equals by comparing date as a stable tiebreaker.
 				if (String(channel.version) > String(best.version)) best = channel;
 			}
 			return best;
@@ -211,74 +190,51 @@ window.__ModuleLoader__.load({
 			return "未知";
 		}
 
+		function useSnapshot(versionCheck) {
+			const [snapshot, setSnapshot] = react.useState(versionCheck.get());
+			react.useEffect(() => versionCheck.subscribe(() => setSnapshot(versionCheck.get())), [versionCheck]);
+			return snapshot;
+		}
+
 		/** Up-arrow glyph: "a release exists above this one". */
-		function VersionGlyph({ size, badge }) {
-			return react.createElement("span", { className: "kitaVersionIcon" },
-				react.createElement("svg", { width: size, height: size, viewBox: "0 0 16 16", "aria-hidden": "true", focusable: "false" },
-					react.createElement("path", {
-						d: "M8 12.2V4.2",
-						fill: "none", stroke: "currentColor", strokeWidth: 1.5, strokeLinecap: "round"
-					}),
-					react.createElement("path", {
-						d: "M4.3 7.5L8 3.8l3.7 3.7",
-						fill: "none", stroke: "currentColor", strokeWidth: 1.5, strokeLinecap: "round", strokeLinejoin: "round"
-					}),
-					react.createElement("path", {
-						d: "M3 13.4h10",
-						fill: "none", stroke: "currentColor", strokeWidth: 1.5, strokeLinecap: "round"
-					})
-				),
-				badge ? react.createElement("span", { className: "kitaVersionDot", "aria-hidden": "true" }) : null
+		function VersionGlyph({ size }) {
+			return react.createElement("svg", {
+				width: size,
+				height: size,
+				viewBox: "0 0 16 16",
+				"aria-hidden": "true",
+				focusable: "false"
+			},
+				react.createElement("path", {
+					d: "M8 12.2V4.2",
+					fill: "none", stroke: "currentColor", strokeWidth: 1.5, strokeLinecap: "round"
+				}),
+				react.createElement("path", {
+					d: "M4.3 7.5L8 3.8l3.7 3.7",
+					fill: "none", stroke: "currentColor", strokeWidth: 1.5, strokeLinecap: "round", strokeLinejoin: "round"
+				}),
+				react.createElement("path", {
+					d: "M3 13.4h10",
+					fill: "none", stroke: "currentColor", strokeWidth: 1.5, strokeLinecap: "round"
+				})
 			);
 		}
 
-		/** Sidebar-foot entry: the only always-visible surface of this plugin. */
-		function FooterButton({ wide, versionCheck }) {
-			const [snapshot, setSnapshot] = react.useState(versionCheck.get());
-			react.useEffect(() => versionCheck.subscribe(() => setSnapshot(versionCheck.get())), [versionCheck]);
-			const payload = snapshot.payload;
-			const current = payload !== null && payload.current ? payload.current : null;
-			const pending = pendingUpdate(payload);
-			const hasUpdate = pending !== null;
-			const version = current !== null && typeof current.version === "string" && current.version !== "" ? current.version : "";
-			let text = "检查版本";
-			if (version !== "") text = "v" + version;
-			if (hasUpdate) text = "v" + version + " · 有新版";
-			if (snapshot.loading && payload === null) text = "检查版本…";
-			let tooltip = "DSH 版本与更新";
-			if (version !== "") tooltip = "当前 DSH 版本 " + version;
-			if (hasUpdate) tooltip = tooltip + "，上游有新版本 " + String(pending.version) + "（点击查看）";
-			return react.createElement("button", {
-				type: "button",
-				className: "kitaVersionBtn" + (wide ? "" : " kitaVersionBtn_rail") + (hasUpdate ? " kitaVersionBtn_update" : ""),
-				title: tooltip,
-				"aria-label": tooltip,
-				onClick: () => versionCheck.open()
-			}, [
-				react.createElement(VersionGlyph, { key: "icon", size: wide ? 16 : 18, badge: hasUpdate }),
-				wide ? react.createElement("span", { key: "label", className: "kitaVersionLabel" }, text) : null
-			]);
+		/** Sidebar entry: an icon only, plus a dot when a release is waiting. */
+		function VersionIcon({ size, active, versionCheck }) {
+			const snapshot = useSnapshot(versionCheck);
+			const pending = pendingUpdate(snapshot.payload);
+			const edge = typeof size === "number" && size > 0 ? size : 18;
+			return react.createElement("span", { className: "kitaVersionIcon", "aria-hidden": "true" },
+				react.createElement(VersionGlyph, { size: edge }),
+				pending !== null ? react.createElement("span", { className: "kitaVersionDot" }) : null
+			);
 		}
 
-		/** Frame-wide surface: the version / update panel. */
-		function VersionOverlay({ versionCheck }) {
-			const [snapshot, setSnapshot] = react.useState(versionCheck.get());
-			react.useEffect(() => versionCheck.subscribe(() => setSnapshot(versionCheck.get())), [versionCheck]);
-			const open = snapshot.open === true;
-
-			react.useEffect(() => {
-				if (!open) return undefined;
-				const onKeyDown = (event) => {
-					if (event.key !== "Escape") return;
-					event.preventDefault();
-					versionCheck.close();
-				};
-				document.addEventListener("keydown", onKeyDown);
-				return () => document.removeEventListener("keydown", onKeyDown);
-			}, [open, versionCheck]);
-
-			if (!open) return null;
-
+		/** The version page rendered in the main column. */
+		function VersionPanel({ versionCheck }) {
+			const snapshot = useSnapshot(versionCheck);
+			react.useEffect(() => versionCheck.prime(), [versionCheck]);
 			const payload = snapshot.payload;
 			const current = payload !== null && payload.current ? payload.current : null;
 			const pending = pendingUpdate(payload);
@@ -320,7 +276,7 @@ window.__ModuleLoader__.load({
 
 			const recentRows = [];
 			if (payload !== null && Array.isArray(payload.recent)) {
-				for (const entry of payload.recent.slice(0, 5)) {
+				for (const entry of payload.recent.slice(0, 6)) {
 					recentRows.push(react.createElement("div", { className: "kitaVersionRecentRow", key: "rc:" + String(entry.version) },
 						react.createElement("span", null, String(entry.version)),
 						react.createElement("span", null, formatWhen(String(entry.publishedAt ?? "")))
@@ -335,61 +291,36 @@ window.__ModuleLoader__.load({
 			const hintParts = [];
 			if (checkedAt !== "") hintParts.push("上次检查 " + checkedAt);
 			if (interval > 0) hintParts.push(String(interval) + " 分钟缓存");
+			if (current !== null && current.resolved !== true) hintParts.push("未能定位运行版本");
 			hintParts.push("升级走演练 + replay-patches，勿在运行中 pnpm install");
 
-			return react.createElement("div", { className: "kitaVersionOverlay" }, [
-				react.createElement("div", {
-					key: "mask",
-					className: "kitaVersionMask",
-					"aria-hidden": "true",
-					onClick: () => versionCheck.close()
-				}),
-				react.createElement("div", {
-					key: "card",
-					className: "kitaVersionCard",
-					role: "dialog",
-					"aria-modal": "true",
-					"aria-label": "DSH 版本与更新"
-				}, [
-					react.createElement("div", { className: "kitaVersionHead", key: "head" }, [
-						react.createElement(VersionGlyph, { key: "glyph", size: 16, badge: hasUpdate }),
-						react.createElement("div", { className: "kitaVersionTitle", key: "title" }, "DSH 版本与更新")
-					]),
-					react.createElement("div", { className: "kitaVersionCurrent", key: "current" }, [
-						react.createElement("span", { className: "kitaVersionCurrentValue", key: "value" }, "v" + version),
-						env !== "" ? react.createElement("span", { className: "kitaVersionMeta", key: "env" }, "env " + env) : null,
-						current !== null && current.resolved !== true
-							? react.createElement("span", { className: "kitaVersionMeta", key: "unresolved" }, "未能定位运行版本")
-							: null
-					]),
-					react.createElement("div", { className: verdictClass, key: "verdict" }, verdictText),
-					rows.length > 0 ? react.createElement("div", { className: "kitaVersionTable", key: "table" }, rows) : null,
-					errorRow,
-					recentRows.length > 0
-						? react.createElement("div", { key: "recent" }, [
-							react.createElement("div", { className: "kitaVersionSection", key: "label" }, "最近发布"),
-							react.createElement("div", { className: "kitaVersionRecent", key: "list" }, recentRows)
-						])
-						: null,
-					react.createElement("div", { className: "kitaVersionFoot", key: "foot" }, [
-						react.createElement("div", { className: "kitaVersionHint", key: "hint" }, hintParts.join(" · ")),
-						react.createElement("div", { className: "kitaVersionActions", key: "actions" }, [
-							react.createElement("button", {
-								key: "refresh",
-								type: "button",
-								className: "kitaVersionAction kitaVersionAction_primary",
-								disabled: snapshot.loading === true,
-								onClick: () => versionCheck.refresh()
-							}, snapshot.loading === true ? "检查中…" : "重新检查"),
-							react.createElement("button", {
-								key: "close",
-								type: "button",
-								className: "kitaVersionAction",
-								onClick: () => versionCheck.close()
-							}, "关闭")
-						])
+			return react.createElement("div", { className: "kitaVersionPanel" }, [
+				react.createElement("div", { className: "kitaVersionPanelHead", key: "head" }, [
+					react.createElement("div", { className: "kitaVersionPanelTitle", key: "title" }, "DSH 版本与更新"),
+					react.createElement("div", { className: "kitaVersionActions", key: "actions" },
+						react.createElement("button", {
+							type: "button",
+							className: "kitaVersionAction kitaVersionAction_primary",
+							disabled: snapshot.loading === true,
+							onClick: () => versionCheck.refresh()
+						}, snapshot.loading === true ? "检查中…" : "重新检查")
+					)
+				]),
+				react.createElement("div", { className: "kitaVersionCurrent", key: "current" }, [
+					react.createElement("span", { className: "kitaVersionCurrentValue", key: "value" }, "v" + version),
+					env !== "" ? react.createElement("span", { className: "kitaVersionMeta", key: "env" }, "env " + env) : null,
+					payload !== null && payload.via ? react.createElement("span", { className: "kitaVersionMeta", key: "via" }, String(payload.via)) : null
+				]),
+				react.createElement("div", { className: verdictClass, key: "verdict" }, verdictText),
+				rows.length > 0 ? react.createElement("div", { className: "kitaVersionTable", key: "table" }, rows) : null,
+				errorRow,
+				recentRows.length > 0
+					? react.createElement("div", { key: "recent" }, [
+						react.createElement("div", { className: "kitaVersionSection", key: "label" }, "最近发布"),
+						react.createElement("div", { className: "kitaVersionRecent", key: "list" }, recentRows)
 					])
-				])
+					: null,
+				react.createElement("div", { className: "kitaVersionHint", key: "hint" }, hintParts.join(" · "))
 			]);
 		}
 
@@ -399,19 +330,18 @@ window.__ModuleLoader__.load({
 			const versionCheck = createStore();
 			ctx.effect(() => () => versionCheck.dispose(), "kita-version-check: store");
 			versionCheck.prime();
-			ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({
-				name: "sidebar.footer.action",
-				id: "kita-version-check",
-				order: 15,
+			ctx.slots.inject("main", () => ctx.slots.register({
+				name: "main",
+				key: PANEL_ID,
+				inject: () => ({ versionCheck })
+			}, VersionPanel));
+			ctx.slots.inject("sidebar.panellist", () => ctx.slots.register({
+				name: "sidebar.panellist",
+				id: PANEL_ID,
+				order: 20,
 				label: "版本更新",
 				inject: () => ({ versionCheck })
-			}, FooterButton));
-			ctx.slots.inject("shell.overlay", () => ctx.slots.register({
-				name: "shell.overlay",
-				id: "kita-version-check.overlay",
-				order: 91,
-				inject: () => ({ versionCheck })
-			}, VersionOverlay));
+			}, VersionIcon));
 		}
 
 		exports.apply = apply;

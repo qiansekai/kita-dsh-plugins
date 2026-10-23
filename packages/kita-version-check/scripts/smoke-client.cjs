@@ -6,19 +6,18 @@
  * with a hand-written React stand-in that runs hooks synchronously. Asserts:
  *
  *   1. The factory exports apply plus the "slots" service dependency.
- *   2. apply registers exactly the two seats this plugin owns, with the
- *      sidebar entry and overlay ids/orders the host tree expects.
- *   3. The store primes through GET /state, opens, and refreshes through
- *      POST /refresh, and dispose clears subscribers.
- *   4. Both components render without throwing: the sidebar entry switches to
- *      the rail variant and reports the update in its tooltip, and the overlay
- *      is null while closed but shows every channel plus the verdict once open.
+ *   2. apply registers exactly the two seats this plugin owns - the sidebar
+ *      panel icon and the main panel under the SAME id/key - and nothing in the
+ *      sidebar foot, which belongs to the restart entry.
+ *   3. The store primes through GET /state and refreshes through POST /refresh.
+ *   4. Both components render without throwing, and the stylesheet stays
+ *      opaque and inside the documented theme token set.
  *
  * Run: node scripts/smoke-client.cjs
  */
-const { readFileSync } = require('node:fs')
-const { join } = require('node:path')
-const vm = require('node:vm')
+const { readFileSync } = require("node:fs")
+const { join } = require("node:path")
+const vm = require("node:vm")
 
 const failures = []
 let checks = 0
@@ -27,7 +26,7 @@ function ok(condition, message) {
   if (!condition) failures.push(message)
 }
 function eq(actual, expected, message) {
-  ok(actual === expected, message + ' (expected ' + String(expected) + ', got ' + String(actual) + ')')
+  ok(actual === expected, message + " (expected " + String(expected) + ", got " + String(actual) + ")")
 }
 
 // ---------- React stand-in: hooks run synchronously per render ----------
@@ -68,13 +67,12 @@ function renderComponent(component, props) {
 }
 
 // ---------- DOM stand-in ----------
-const documentListeners = []
 const fakeDocument = {
   querySelector: () => null,
   createElement: () => ({ dataset: {}, textContent: "" }),
   head: { appendChild: () => {} },
   body: { appendChild: () => {} },
-  addEventListener: (type, handler) => documentListeners.push([type, handler]),
+  addEventListener: () => {},
   removeEventListener: () => {}
 }
 
@@ -114,18 +112,14 @@ const payload = {
 const fetchCalls = []
 async function fakeFetch(path, options) {
   fetchCalls.push({ path, method: options === undefined ? "" : options.method })
-  return {
-    ok: true,
-    status: 200,
-    json: async () => payload
-  }
+  return { ok: true, status: 200, json: async () => payload }
 }
 
 // ---------- load the bundle exactly as the loader does ----------
 const source = readFileSync(join(__dirname, "..", "lib", "client.js"), "utf8")
 
-// The panel must stay fully opaque: a translucent card over live page content is
-// exactly what made it illegible. Only documented theme tokens may be used, so a
+// The page must stay fully opaque: a translucent surface over live content is
+// what made text unreadable. Only documented theme tokens may be used, so a
 // typo'd variable cannot silently leave text unthemed.
 const THEME_TOKENS = [
   "--dsw-alias-bg-base",
@@ -141,7 +135,7 @@ const THEME_TOKENS = [
   "--dsw-alias-state-idle-primary",
   "--dsw-alias-state-success-primary",
   "--dsw-alias-state-warn-primary",
-  "--dsw-specific-sidebar-fill",
+  "--dsw-specific-sidebar-fill"
 ]
 const usedTokens = [...new Set([...source.matchAll(/var\((--dsw-[a-z0-9-]+)/g)].map((match) => match[1]))]
 const unknownTokens = usedTokens.filter((token) => !THEME_TOKENS.includes(token))
@@ -149,10 +143,8 @@ eq(unknownTokens.length, 0, "every theme token is documented (unknown: " + unkno
 ok(usedTokens.length >= 8, "the stylesheet themes through tokens, not literal colors")
 ok(source.includes("color-mix") === false, "no color-mix translucency in the stylesheet")
 ok(source.includes("backdrop-filter") === false, "no backdrop blur behind text")
-ok(source.includes("--dsw-specific-menu") === false, "the card avoids the translucent menu surface")
+ok(source.includes("--dsw-specific-menu") === false, "no translucent menu surface")
 ok(source.includes("--dsw-alias-label-tertiary") === false, "no undocumented tertiary label token")
-// A hard-coded white label turns into white-on-white once the brand token is a
-// light accent (dark theme); the primary action must invert against the theme.
 ok(source.includes("color:#fff") === false, "no hard-coded white text on themed surfaces")
 
 let captured = null
@@ -179,7 +171,6 @@ const exportsObject = factory((name) => {
   throw new Error("unexpected require: " + name)
 })
 eq(typeof exportsObject.apply, "function", "the client half exports apply")
-eq(Array.isArray(exportsObject.inject), true, "the client half declares injected services")
 eq(String(exportsObject.inject), "slots", "the only client service dependency is slots")
 
 // ---------- capture ctx: slots + effect ----------
@@ -210,76 +201,55 @@ eq(injects, 2, "apply injects into exactly two slots")
 eq(registrations.length, 2, "apply registers exactly two seats")
 const byName = {}
 for (const entry of registrations) byName[entry.spec.name] = entry
-ok(byName["sidebar.footer.action"] !== undefined, "sidebar.footer.action is registered")
-ok(byName["shell.overlay"] !== undefined, "shell.overlay is registered")
-eq(byName["sidebar.footer.action"].spec.id, "kita-version-check", "sidebar entry id is stable")
-eq(byName["sidebar.footer.action"].spec.order, 15, "sidebar entry order leads the restart button")
-eq(byName["sidebar.footer.action"].spec.label, "版本更新", "sidebar entry carries a projection label")
-eq(byName["shell.overlay"].spec.id, "kita-version-check.overlay", "overlay id is stable")
-eq(byName["shell.overlay"].spec.order, 91, "overlay order sits above the default layer")
+ok(byName["main"] !== undefined, "the main panel is registered")
+ok(byName["sidebar.panellist"] !== undefined, "the sidebar panel icon is registered")
+eq(byName["sidebar.footer.action"], undefined, "the sidebar foot stays free for the restart entry")
+eq(byName["shell.overlay"], undefined, "no overlay seat is taken")
 
-// Both seats must receive one shared store from their inject props.
-const footerStore = byName["sidebar.footer.action"].spec.inject()
-const overlayStore = byName["shell.overlay"].spec.inject()
-eq(typeof footerStore.versionCheck, "object", "sidebar entry receives the store")
-ok(footerStore.versionCheck === overlayStore.versionCheck, "both seats share one store instance")
+const panelKey = byName["main"].spec.key
+eq(panelKey, "kita-version-check", "the main panel key is the package id")
+eq(byName["sidebar.panellist"].spec.id, panelKey, "the sidebar entry id matches the main panel key")
+eq(byName["sidebar.panellist"].spec.order, 20, "the sidebar entry sorts after Plugins and Schedules")
+eq(byName["sidebar.panellist"].spec.label, "版本更新", "the sidebar entry carries a projection label")
 
-const store = footerStore.versionCheck
-eq(store.get().open, false, "the store starts closed")
-eq(fetchCalls.length >= 0, true, "fetch was callable")
+const iconStore = byName["sidebar.panellist"].spec.inject()
+const panelStore = byName["main"].spec.inject()
+ok(iconStore.versionCheck === panelStore.versionCheck, "both seats share one store instance")
+const store = iconStore.versionCheck
 
-// ---------- store: prime / open / refresh / dispose ----------
-const footerComponent = byName["sidebar.footer.action"].component
-const overlayComponent = byName["shell.overlay"].component
-
-// Prime is called by apply, so a state request is already in flight.
+// ---------- store: prime / refresh / dispose ----------
 eq(fetchCalls.length, 1, "apply primes exactly one state request")
 eq(fetchCalls[0].path, "/kita-version-check/state", "priming reads /state")
 eq(fetchCalls[0].method, "GET", "priming is a GET")
 
+const iconComponent = byName["sidebar.panellist"].component
+const panelComponent = byName["main"].component
+
 async function run() {
   await new Promise((resolve) => setTimeout(resolve, 0))
   ok(store.get().payload !== null, "priming resolves the payload")
-  eq(store.get().error, null, "priming reports no error")
 
-  // Sidebar entry, wide: version plus an update hint in the tooltip.
-  const wide = renderComponent(footerComponent, { wide: true, versionCheck: store })
-  eq(wide.type, "button", "the sidebar entry renders a button")
-  ok(String(wide.props.className).includes("kitaVersionBtn"), "the button carries the package class")
-  eq(String(wide.props.className).includes("kitaVersionBtn_rail"), false, "the wide variant is not the rail")
-  ok(String(wide.props.title).includes("0.2.1-rc.2"), "the tooltip reports the running version")
-  ok(String(wide.props.title).includes("0.2.1-rc.3"), "the tooltip reports the available update")
-  const labels = wide.children.filter((child) => child !== null && child !== undefined && typeof child === "object")
-  const label = labels.find((child) => child.props !== undefined && String(child.props.className ?? "").includes("kitaVersionLabel"))
-  ok(label !== undefined, "the wide variant renders a text label")
-  ok(label !== undefined && String(label.children[0]).includes("有新版"), "the label announces the update")
+  // Sidebar icon: glyph plus the update dot, sized by the owner.
+  const icon = renderComponent(iconComponent, { size: 20, active: false, versionCheck: store })
+  eq(String(icon.props.className), "kitaVersionIcon", "the sidebar entry renders the icon frame")
+  const iconChildren = icon.children.filter((child) => child !== null && child !== undefined)
+  eq(iconChildren.length, 2, "the icon carries the glyph and the update dot")
+  eq(typeof iconChildren[0].type, "function", "the first child is the glyph component")
+  eq(iconChildren[0].props.size, 20, "the glyph follows the requested icon size")
+  eq(String(iconChildren[1].props.className), "kitaVersionDot", "the update dot is present while a release is waiting")
+  const glyphTree = renderComponent(iconChildren[0].type, iconChildren[0].props)
+  eq(glyphTree.type, "svg", "the glyph renders an svg")
 
-  // Sidebar entry, rail: icon only.
-  const rail = renderComponent(footerComponent, { wide: false, versionCheck: store })
-  eq(String(rail.props.className).includes("kitaVersionBtn_rail"), true, "the rail variant collapses to the icon")
-  const railChildren = rail.children.filter((child) => child !== null && child !== undefined)
-  eq(railChildren.length, 1, "the rail drops the text label")
-  const glyphElement = railChildren[0]
-  eq(typeof glyphElement.type, "function", "the rail keeps the glyph component")
-  eq(glyphElement.props.badge, true, "the glyph is told to show the update badge")
-  const glyphTree = renderComponent(glyphElement.type, glyphElement.props)
-  eq(String(glyphTree.props.className), "kitaVersionIcon", "the glyph renders the package icon")
-  const dots = glyphTree.children.filter((child) => child !== null && child !== undefined
-    && String(child.props !== undefined ? child.props.className : "") === "kitaVersionDot")
-  eq(dots.length, 1, "the glyph carries the update badge")
-
-  // Overlay while closed renders nothing.
-  eq(renderComponent(overlayComponent, { versionCheck: store }), null, "the overlay renders nothing while closed")
-
-  // Opening the overlay renders every channel plus the verdict.
-  store.open()
-  eq(store.get().open, true, "open() flips the overlay store")
-  const overlay = renderComponent(overlayComponent, { versionCheck: store })
-  ok(overlay !== null && typeof overlay === "object", "the overlay renders once open")
-  eq(String(overlay.props.className).includes("kitaVersionOverlay"), true, "the overlay carries the layer class")
+  // Main panel: version, verdict, channels, recent releases, refresh button.
+  const panel = renderComponent(panelComponent, { versionCheck: store })
+  eq(String(panel.props.className), "kitaVersionPanel", "the panel renders the page container")
   const found = []
+  const texts = []
   const walk = (node) => {
-    if (node === null || typeof node !== "object") return
+    if (node === null || typeof node !== "object") {
+      if (typeof node === "string") texts.push(node)
+      return
+    }
     if (Array.isArray(node)) {
       for (const item of node) walk(item)
       return
@@ -287,9 +257,15 @@ async function run() {
     if (node.props !== undefined && String(node.props.className ?? "").includes("kitaVersionRow")) found.push(node)
     if (node.children !== undefined) walk(node.children)
   }
-  walk(overlay)
-  eq(found.length, 3, "the overlay lists every configured channel")
-  eq(store.get().open, true, "the overlay stays open while rendered")
+  walk(panel)
+  eq(found.length, 3, "the panel lists every configured channel")
+  const joined = texts.join(" | ")
+  ok(joined.includes("DSH 版本与更新"), "the panel is titled")
+  ok(joined.includes("v0.2.1-rc.2"), "the panel reports the running version")
+  ok(joined.includes("alpha-test"), "the panel reports the deployment name")
+  ok(joined.includes("上游有新版本"), "the verdict announces the available release")
+  ok(joined.includes("0.2.1-rc.3"), "the verdict names the available version")
+  ok(joined.includes("最近发布"), "recent releases are listed")
 
   // Refreshing goes through the POST route.
   const before = fetchCalls.length
@@ -299,17 +275,17 @@ async function run() {
   eq(fetchCalls[fetchCalls.length - 1].path, "/kita-version-check/refresh", "refresh posts to /refresh")
   eq(fetchCalls[fetchCalls.length - 1].method, "POST", "refresh is a POST")
 
-  // Closing then disposing.
-  store.close()
-  eq(store.get().open, false, "close() hides the overlay again")
+  // Subscribers are notified, and dispose clears them.
   let notified = 0
   store.subscribe(() => { notified += 1 })
-  store.open()
-  store.close()
-  eq(notified, 2, "subscribers are notified on every state change")
+  store.refresh()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  ok(notified >= 2, "subscribers observe loading and completion")
   store.dispose()
-  store.open()
-  eq(notified, 2, "dispose clears the subscriber set")
+  const afterDispose = notified
+  store.refresh()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  eq(notified, afterDispose, "dispose clears the subscriber set")
 
   for (const dispose of disposers) {
     try {
