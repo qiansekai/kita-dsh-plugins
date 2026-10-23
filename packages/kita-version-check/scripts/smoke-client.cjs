@@ -123,6 +123,38 @@ async function fakeFetch(path, options) {
 
 // ---------- load the bundle exactly as the loader does ----------
 const source = readFileSync(join(__dirname, "..", "lib", "client.js"), "utf8")
+
+// The panel must stay fully opaque: a translucent card over live page content is
+// exactly what made it illegible. Only documented theme tokens may be used, so a
+// typo'd variable cannot silently leave text unthemed.
+const THEME_TOKENS = [
+  "--dsw-alias-bg-base",
+  "--dsw-alias-bg-layer-1",
+  "--dsw-alias-bg-layer-2",
+  "--dsw-alias-bg-overlay",
+  "--dsw-alias-border-l1",
+  "--dsw-alias-border-l2",
+  "--dsw-alias-brand-primary",
+  "--dsw-alias-label-primary",
+  "--dsw-alias-label-secondary",
+  "--dsw-alias-state-error-primary",
+  "--dsw-alias-state-idle-primary",
+  "--dsw-alias-state-success-primary",
+  "--dsw-alias-state-warn-primary",
+  "--dsw-specific-sidebar-fill",
+]
+const usedTokens = [...new Set([...source.matchAll(/var\((--dsw-[a-z0-9-]+)/g)].map((match) => match[1]))]
+const unknownTokens = usedTokens.filter((token) => !THEME_TOKENS.includes(token))
+eq(unknownTokens.length, 0, "every theme token is documented (unknown: " + unknownTokens.join(", ") + ")")
+ok(usedTokens.length >= 8, "the stylesheet themes through tokens, not literal colors")
+ok(source.includes("color-mix") === false, "no color-mix translucency in the stylesheet")
+ok(source.includes("backdrop-filter") === false, "no backdrop blur behind text")
+ok(source.includes("--dsw-specific-menu") === false, "the card avoids the translucent menu surface")
+ok(source.includes("--dsw-alias-label-tertiary") === false, "no undocumented tertiary label token")
+// A hard-coded white label turns into white-on-white once the brand token is a
+// light accent (dark theme); the primary action must invert against the theme.
+ok(source.includes("color:#fff") === false, "no hard-coded white text on themed surfaces")
+
 let captured = null
 const sandbox = {
   window: { __ModuleLoader__: { load: (spec) => { captured = spec } } },
