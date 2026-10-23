@@ -1,0 +1,31 @@
+{
+  "name": "kita-version-check",
+  "version": "1.0.0",
+  "description": "DSH version/update check in the left sidebar: a sidebar-foot entry comparing the running deployment version against the npm registry dist-tags, with a detail panel.",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  },
+  "files": [
+    "lib",
+    "scripts",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {},
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "license": "MIT"
+}
