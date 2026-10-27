@@ -1,0 +1,29 @@
+{
+  "name": "kita-dsh-shell-bridge",
+  "version": "1.0.0",
+  "description": "Pushes DSH session state (working / done) to the dsh-mobile-shell WebView via window.DshShell, so the phone can raise system notifications.",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  },
+  "files": [
+    "lib",
+    "README.md"
+  ],
+  "dependencies": {},
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "license": "MIT"
+}
