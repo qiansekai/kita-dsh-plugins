@@ -1,7 +1,7 @@
 {
   "name": "kita-reconnect-on-visible",
-  "description": "Auto-reconnect the dsh web connection when the tab returns to foreground after lock screen / backgrounding (terminal-disconnected recovery).",
-  "version": "1.0.0",
+  "description": "Reconnect the dsh web connection when the tab returns to foreground, then rebuild a stale Session list (Sessions created by other clients while this tab was away).",
+  "version": "1.1.0",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -22,5 +22,8 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "scripts": {
+    "verify": "node scripts/verify-client.mjs"
+  }
 }
