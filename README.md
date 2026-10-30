@@ -102,8 +102,9 @@ dsh plugin --profile web add link:<本仓库绝对路径>/packages/kita-terminal
 ## 开发
 
 ```powershell
-node scripts/check-packages.mjs          # 规范自检（需要 js-yaml：npm i -D js-yaml）
-node scripts/install.mjs --list          # 包清单
+node scripts/check-packages.mjs            # 规范自检（无 js-yaml 时降级为 PARTIAL：跳过 patch YAML 校验，其余照查）
+npm i && node scripts/check-packages.mjs   # 完整自检（含 patch YAML 解析）
+node scripts/install.mjs --list            # 包清单
 ```
 
 - 规范与模板：[`docs/bundle-spec.md`](docs/bundle-spec.md)
