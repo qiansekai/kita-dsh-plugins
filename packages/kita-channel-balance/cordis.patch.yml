@@ -1,0 +1,9 @@
+# kita-channel-balance bundle patch: one row installing the composer balance chip
+# (host balance routes + the client seat next to the model selector).
+- insert:
+    - id: kita-channel-balance
+      name: 'kita-channel-balance'
+      config:
+        refreshIntervalMs: 60000
+        requestTimeoutMs: 8000
+        endpointCacheMs: 1800000

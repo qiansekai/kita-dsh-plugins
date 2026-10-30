@@ -1,9 +1,28 @@
 {
   "name": "kita-mobile-panel",
   "version": "0.2.0",
-  "description": "Host bridge for the dsh mobile panel: whitelisted git runner for the git view tab.",
-  "private": true,
+  "description": "Host bridge for the dsh mobile panel: whitelisted git runner (POST /mobile-git/run) for the git view tab.",
   "type": "module",
   "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": [
+    "lib/*.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {},
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5"
+  },
   "license": "MIT"
 }

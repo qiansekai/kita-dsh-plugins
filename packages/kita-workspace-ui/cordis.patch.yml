@@ -1,4 +1,9 @@
-# kita-workspace-ui bundle patch: one client-only row replacing the official ui-workspace.
+# kita-workspace-ui bundle patch: disable the official row, then install the fork.
+# The fork ships a built lib/client.js tied to one exact dsh build; see README.md
+# "version binding" before installing it next to a different dsh version.
+- id: ui-workspace
+  disabled: true
+
 - insert:
     - id: kita-workspace-ui
       name: 'kita-workspace-ui'

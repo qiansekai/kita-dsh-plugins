@@ -1,4 +1,8 @@
-# kita-dsh-gateway bundle patch: one host-only plugin row.
+# kita-dsh-gateway bundle patch: one host + client row.
+# port       : LAN entry the gateway binds (dsh itself stays on targetPort)
+# targetPort : the dsh web port to proxy to
+# Both can also be overridden per instance by DSH_GATEWAY_PORT / DSH_GATEWAY_TARGET_PORT,
+# which is what lets a second dsh instance run beside the first one.
 - insert:
     - id: kita-dsh-gateway
       name: 'kita-dsh-gateway'

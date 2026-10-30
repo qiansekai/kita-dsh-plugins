@@ -1,0 +1,11 @@
+# kita-mobile-panel bundle patch
+#
+# 只插入一行：注册受限 git 桥 POST /mobile-git/run（动词 + flag 双白名单、
+# 输出上限、硬超时）。终端 / 文件路由已于 0.2.0 移除，交给官方右侧栏。
+#
+# 该路由自身不带鉴权：设计前提是经 kita-dsh-gateway 的配对鉴权（手机侧）
+# 或本机 loopback 直连（桌面侧）访问，不要无鉴权单独暴露。
+# 无可配置项，故不写 config。
+- insert:
+    - id: kita-mobile-panel
+      name: 'kita-mobile-panel'

@@ -65,17 +65,32 @@ npm run build        # → lib/client.js
 的 `require` 只解析 seed 词（`react`、`react/jsx-runtime`、`url`）与已注册的 module-graph
 行，普通 npm 包不在模块表里，`react` 因此保持 external、其余全部打包进来（约 3.0 MB）。
 
-## 装配
+## 装法与版本要求
 
-包通过 junction 挂到 profile 的 `node_modules`，再在 profile 的 `cordis.patch.yml` 里插入：
+要求 DSH `0.2.1-rc.2`（`@deepseek-ai/dsh`），宿主提供 `@deepseek-ai/cordis ~4.0.5`
+（已声明为 peerDependency，随 dsh 发布）。**拿到包不需要跑构建**：`lib/client.js`
+（约 3.0 MB 的客户端 bundle）已随包入库。
 
-```yaml
-- insert:
-    - id: 'kita-office-preview'
-      name: 'kita-office-preview'
+朋友安装（bundle 形态，推荐）：
+
+```
+dsh plugin --profile web add <本仓库路径>/packages/kita-office-preview
 ```
 
-**新增客户端 entry 会改变启动图，必须重启 dsh web 才生效**（仅硬刷新不够）。
+再把包名 `kita-office-preview` 加进该 profile `package.json` 的 `dsh.profile.bundles` 数组，
+profile 会装配本包自带的 `cordis.patch.yml`（insert 行 id 与 name 都是包名）；
+本仓库根 `node scripts/install.mjs --only kita-office-preview` 会一次做完这两步。
+
+**新增客户端 entry 会改变启动图，装完必须重启 dsh web 才生效**（仅硬刷新不够）。
+
+本机开发装配（pnpm workspace junction）：包通过 junction 挂到 profile 的 `node_modules`，
+再在 profile 的 `cordis.patch.yml` 里插入 `- id: 'kita-office-preview'` / `name: 'kita-office-preview'`。
+
+## 配置项
+
+本包**没有配置项**：host 半是空 apply（只为出现在 Loader 里），client 半认领哪些后缀由
+`src/client/index.ts` 的 `EXTENSIONS` 常量决定。文件读取上限也不归本包管 —— 走官方
+`readAll`，受宿主 `maxFileBytes`（默认 32 MiB）限制。
 
 ## 已知边界
 

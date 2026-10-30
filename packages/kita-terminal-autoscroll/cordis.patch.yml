@@ -1,0 +1,5 @@
+# kita-terminal-autoscroll bundle patch: one client-only row, no official row to replace.
+# No config: the client half follows code defaults (the 0.2.1-rc.2 client runner delivers no config).
+- insert:
+    - id: kita-terminal-autoscroll
+      name: 'kita-terminal-autoscroll'

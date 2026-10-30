@@ -12,24 +12,12 @@
  *    stops the automatic provider), or pass `resume_auto: true` to hand
  *    control back to the automatic system.
  */
-import z from '@deepseek-ai/schemastery'
 import { z as zod } from 'zod'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { SessionTitleLlmConfigFields, registerSessionTitleLlmProvider } from '@deepseek-ai/dsh-session-title-llm'
 
 export const name = 'kita-session-title-auto'
 
 export const inject = ['sessionTitle', 'llm', 'sessions', 'tools', 'systemPrompt']
-
-export const Config = z.object({
-  targetWords: SessionTitleLlmConfigFields.targetWords,
-  targetCjkCharacters: SessionTitleLlmConfigFields.targetCjkCharacters,
-  maxInputBytes: SessionTitleLlmConfigFields.maxInputBytes,
-  maxOutputTokens: SessionTitleLlmConfigFields.maxOutputTokens,
-  timeoutMs: SessionTitleLlmConfigFields.timeoutMs,
-  provider: SessionTitleLlmConfigFields.provider,
-  model: SessionTitleLlmConfigFields.model,
-})
 
 /** Client-visible projection: the latest accepted title's provenance and clock. */
 const titleAutoMetaSchema = zod.object({
@@ -75,9 +63,9 @@ function selectRecentMessages(messages, maxInputBytes) {
 }
 
 export function apply(ctx, config) {
-  registerSessionTitleLlmProvider(ctx, config, name, 'all-prompts', (messages) =>
-    selectRecentMessages(messages, config.maxInputBytes))
-
+  // 2026-10-13: 自动重拟改由官方 @deepseek-ai/dsh-session-title-all-prompts-llm 承担
+  // （由 @deepseek-ai/dsh-experimental-session-titles-bundle 加载，参数与原先一致）。
+  // 本插件只保留：update_session_title 工具、kitaTitleAuto 投影、会话标题维护提示词段。
   // Publish the latest title provenance to the client (`useProjection('kitaTitleAuto')`),
   // so the header mark can show ✨ (provider-maintained) / 📌 (user-pinned) and the
   // last automatic revision's clock. A new state reference is returned for every

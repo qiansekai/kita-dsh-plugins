@@ -1,0 +1,15 @@
+# kita-session-title-auto bundle patch
+#
+# 1) 停用官方首条消息标题提供者（@deepseek-ai/dsh-session-title-first-prompt-llm，
+#    base 里的 id 就是 session-title-llm）。ctx.sessionTitle 的提供者是单例，
+#    本包替代它所在的位置，故必须显式停用，不再要求用户手改 profile patch。
+# 2) 插入本包：update_session_title 工具 + kitaTitleAuto 投影 + 标题维护提示段。
+#
+# 自动重拟本身（all-prompts 档位）由官方 @deepseek-ai/dsh-experimental-session-titles-bundle
+# 提供；需要「AI 自动维护」的标题就一并装那个 bundle，否则标题只剩首条消息兜底。
+- id: session-title-llm
+  disabled: true
+
+- insert:
+    - id: kita-session-title-auto
+      name: 'kita-session-title-auto'

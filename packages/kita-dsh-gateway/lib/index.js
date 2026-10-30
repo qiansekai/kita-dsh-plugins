@@ -16,7 +16,7 @@
 import http from 'node:http'
 import net from 'node:net'
 import crypto from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { createReadStream, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import z from '@deepseek-ai/schemastery'
@@ -99,6 +99,13 @@ export const Config = z.object({
    * empty (the default) means "read the file, mint on first boot".
    */
   adminToken: z.string().default(''),
+  /**
+   * Directory holding the mobile-shell APK distribution: a `version.json`
+   * manifest (versionCode/versionName/sha256/size/file) plus the APK it names.
+   * Empty (the default) disables the /apk/* routes, so a deployment that does
+   * not publish builds behaves exactly as before.
+   */
+  apkDir: z.string().default(''),
 })
 
 const COOKIE_NAME = 'kita_gw'
@@ -294,6 +301,73 @@ function proxyWs(req, socket, head, targetPort) {
   socket.on('error', () => upstream.destroy())
   socket.on('close', () => upstream.destroy())
   upstream.on('close', () => socket.destroy())
+}
+
+/**
+ * Mobile-shell APK distribution.
+ *
+ * The phone asks `/apk/version` for a manifest and then downloads exactly the
+ * artifact that manifest names. The directory is a deployment value, and a
+ * request may only name the file the manifest itself lists — so no traversal
+ * reaches the filesystem even though the route is reachable by any paired
+ * device.
+ */
+function serveApk(req, res, pathname, apkDir) {
+  if (typeof apkDir !== 'string' || apkDir === '') {
+    res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' })
+    res.end(JSON.stringify({ error: 'apk distribution is not configured' }))
+    return
+  }
+  let manifest = null
+  try {
+    manifest = JSON.parse(readFileSync(join(apkDir, 'version.json'), 'utf8'))
+  } catch {
+    manifest = null
+  }
+  if (manifest === null || typeof manifest !== 'object' || typeof manifest.versionCode !== 'number') {
+    res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+    res.end(JSON.stringify({ error: 'no apk manifest' }))
+    return
+  }
+  if (pathname === '/apk/version') {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+    res.end(JSON.stringify({
+      versionCode: manifest.versionCode,
+      versionName: String(manifest.versionName ?? ''),
+      sha256: String(manifest.sha256 ?? ''),
+      size: Number(manifest.size ?? 0),
+      file: String(manifest.file ?? ''),
+      builtAt: Number(manifest.builtAt ?? 0),
+      notes: String(manifest.notes ?? ''),
+    }))
+    return
+  }
+  const requested = pathname.slice('/apk/'.length)
+  const allowed = String(manifest.file ?? '')
+  if (requested === '' || requested !== allowed
+    || requested.includes('/') || requested.includes('\\')) {
+    res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' })
+    res.end(JSON.stringify({ error: 'unknown artifact' }))
+    return
+  }
+  let stat = null
+  try {
+    stat = statSync(join(apkDir, requested))
+  } catch {
+    stat = null
+  }
+  if (stat === null || !stat.isFile()) {
+    res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' })
+    res.end(JSON.stringify({ error: 'artifact missing on disk' }))
+    return
+  }
+  res.writeHead(200, {
+    'Content-Type': 'application/vnd.android.package-archive',
+    'Content-Length': stat.size,
+    'Content-Disposition': `attachment; filename="${requested}"`,
+    'Cache-Control': 'no-store',
+  })
+  createReadStream(join(apkDir, requested)).pipe(res)
 }
 
 /**
@@ -1159,6 +1233,19 @@ export function apply(ctx, config) {
       }
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
       res.end(JSON.stringify(pairingQr()))
+      return
+    }
+    // Mobile-shell self-update artifacts. Same device credential as every
+    // other route: a phone that can read the DSH page can fetch its own APK.
+    if (pathname === '/apk/version' || pathname.startsWith('/apk/')) {
+      const apkToken = isAuthed(req, tokens)
+      if (apkToken === null) {
+        res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ error: 'unauthorized: pair at /gateway-pair' }))
+        return
+      }
+      touchToken(apkToken, req)
+      serveApk(req, res, pathname, config?.apkDir ?? '')
       return
     }
     // Admin surface: this machine, with the grant. A tunnel of any kind dials

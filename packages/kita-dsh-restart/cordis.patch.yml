@@ -1,0 +1,7 @@
+# kita-dsh-restart bundle patch: one host + client row.
+# config is optional: with no dshEnvsDir the plugin infers it from $DSH_HOME and,
+# when no start.ps1 is found, reports the reason through /kita-restart/status
+# instead of failing profile assembly.
+- insert:
+    - id: kita-dsh-restart
+      name: 'kita-dsh-restart'

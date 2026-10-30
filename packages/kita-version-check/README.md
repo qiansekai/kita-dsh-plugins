@@ -54,7 +54,8 @@ re-query and a page load never waits on the network twice.
 (a release outranks its prereleases, numeric prerelease identifiers compare
 numerically, build metadata is ignored), so no dependency is added for it. Each
 channel reports `relation`: `newer` / `equal` / `older` / `unknown`. The panel
-lists every channel, the five most recent releases, and one verdict line.
+lists every channel, the six most recent releases (of the `versionListLimit` the
+host returns), and one verdict line.
 
 The plugin deliberately offers no "upgrade" button: upgrading means a rehearsal
 environment plus the replayed patch chain, never an in-place install against a
@@ -80,7 +81,34 @@ Node's `fetch` does not honour `*_PROXY`, so the proxy path is a real HTTP
 `CONNECT` tunnel; the direct request is tried first and every attempt's failure
 is reported in one error line.
 
-## Assembly (four places, plus one link)
+Keys whose default is `''` stay off until filled in: `proxyUrl` empty means no
+explicit proxy (`useEnvironmentProxy` still tries the environment), `dshHome`
+empty means `$DSH_HOME`, `envsDir` empty means two levels above the home (the
+usual `<envs>/<name>/home` layout), and `dshPackageJson` empty means detect from
+the running process — which is the recommended setting.
+
+## Install as a bundle
+
+Requires DSH `0.2.1-rc.2` (`@deepseek-ai/dsh`). The host must provide
+`@deepseek-ai/cordis ~4.0.5` and `@deepseek-ai/schemastery ~3.18.5`; both are
+declared as peerDependencies and ship with dsh, so do not install a second copy.
+
+The package declares `dsh.bundle.patch` (`./cordis.patch.yml`), and that patch
+inserts this plugin's own row, so installing the package as a bundle is all a
+friend needs:
+
+```
+dsh plugin --profile web add <repository>/packages/kita-version-check
+```
+
+Then add `kita-version-check` to that profile's `dsh.profile.bundles` so the
+profile assembles the bundled patch. From the repository root,
+`node scripts/install.mjs --only kita-version-check` performs both steps.
+
+**A new client entry changes the boot graph: restart dsh web after installing**
+(the sidebar entry will not appear on a hard refresh alone).
+
+## Local development assembly (four places, plus one link)
 
 ```
 plugins-src/kita-version-check/           <- this package (production source)
@@ -109,3 +137,25 @@ node scripts/smoke-client.cjs   # 51 checks: bundle registration, the two seats,
 CONNECT proxy, so it exercises the same code path the deployment uses. It needs
 `@deepseek-ai/schemastery` resolvable from this package (link it into
 `node_modules/` once when running from the monorepo).
+
+## Known limits
+
+- Read-only by design: no upgrade button, and the package never writes to the
+  deployment. An in-place upgrade against a running dsh web is not a supported
+  path — upgrading means a rehearsal environment plus the replayed patch chain.
+- The version is only as good as the detectably running `package.json`: when no
+  candidate carries `name === packageName`, `current.resolved` is `false` and
+  every `relation` is `unknown` (the panel shows the unresolved state instead of
+  guessing a version).
+- The deployment name comes from `<envsDir>/active-env.txt`. A missing file only
+  drops the name; the version is still reported (degrade, never throw).
+- Only dist-tags are compared (`latest` / `next` / `alpha` by default), so a
+  release that is on npm but not tagged is invisible here. Prerelease ordering is
+  local SemVer 2.0.0; build metadata is ignored.
+- The panel lists at most six recent releases even when `versionListLimit` asks
+  for more: the host returns up to `versionListLimit`, the client renders six.
+- Registry access needs the network. Use `registry` for an intranet mirror; the
+  proxy path is a plain HTTP `CONNECT` tunnel only (`http://host:port`, no SOCKS)
+  and a direct request is always tried first.
+- The disk cache lives in `<home>/storages/kita-version-check.json`; an
+  unwritable home degrades to memory-only and re-queries after a restart.

@@ -98,7 +98,14 @@ function validateConfig(config) {
 
 export function apply(ctx, config = {}) {
   const cfg = { ...DEFAULTS, ...config }
-  validateConfig(cfg)
+  // 装配期不许 throw：一行写错的 config 不能让整个 profile 装不起来（bundle 规范第 3 节）。
+  try {
+    validateConfig(cfg)
+  } catch (error) {
+    const message = error !== null && typeof error === 'object' && 'message' in error ? String(error.message) : String(error)
+    console.log('[dsh-quota-retry] ' + message + ' —— 配置无效，插件已跳过（本轮运行不会自动重试）')
+    return
+  }
   const random = Math.random
   const lifetime = new AbortController()
   const active = new Set()

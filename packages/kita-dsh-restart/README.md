@@ -56,18 +56,21 @@ CSRF：dsh 的 loopback 载体自身不鉴权，而 LAN 侧由 kita-dsh-gateway 
 `location.reload()`。**不需要重新取 launch token** —— 浏览器 cookie 由持久化 secret 签名
 （`dsh-client-connection` 的 `credentials` 记录），跨进程重启依然有效。
 
-## 装配
+## 安装
 
-profile `cordis.patch.yml`：
+本包按 DSH 0.2.1-rc.2 的 bundle 形态声明，`dsh.bundle.patch` 指向自带 `cordis.patch.yml`：
 
-```yaml
-- insert:
-    - id: 'kita-dsh-restart'
-      name: 'kita-dsh-restart'
+```powershell
+dsh plugin --profile web add link:<仓库绝对路径>/packages/kita-dsh-restart
 ```
 
-host 侧改动需重启 dsh 生效；client 侧改动硬刷新即可。按本仓库双落点约定，同时存在于本
-monorepo 与 `<home>\profiles\web\plugins-src\kita-dsh-restart`。
+再把 `kita-dsh-restart` 加进 `<DSH_HOME>/profiles/web/package.json` 的 `dsh.profile.bundles`，
+或直接用 `node scripts/install.mjs --only kita-dsh-restart`。装完需重启一次 dsh web（顺带这也是
+本插件自己的首次生效条件）。
+
+**可移植性**：插件不假定本机部署布局。`dshEnvsDir` 未配置时按 `$DSH_HOME` 上两级推断，
+该目录下找不到 `start.ps1` 时**不会让 profile 装配失败**，只在 `/kita-restart/status` 的
+`task.error` 里给出原因（按钮仍在，点击会显示失败卡片）。没有计划任务权限的机器上同理。
 
 ## 配置
 

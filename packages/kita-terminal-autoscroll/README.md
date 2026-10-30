@@ -34,7 +34,10 @@ dsh 的所有 shell 输出都走官方共享原语 `TerminalBlock`，其输出�
 契约：卡片根上的 `data-terminal` 属性 + 计算样式里的 `overflow-y`。
 上游改版面也只会退化成静默 no-op，不会报错。
 
-## 装配
+## 安装与版本要求
+
+作为 **bundle 插件**发布：`package.json` 的 `dsh.bundle.patch` 指向本包自带的 `cordis.patch.yml`，
+装进来即可，**不需要手改 profile 的 `cordis.patch.yml`**。自带的 patch 就是这一段：
 
 ```yaml
 - insert:
@@ -42,15 +45,49 @@ dsh 的所有 shell 输出都走官方共享原语 `TerminalBlock`，其输出�
       name: 'kita-terminal-autoscroll'
 ```
 
-可选配置（`config` 段）：
+| 项 | 要求 |
+|---|---|
+| `@deepseek-ai/dsh` | **0.2.1-rc.2**（实测版本；0.2.x 应可用，0.1.x 的插件形态不同，不保证） |
+| `@deepseek-ai/cordis` | `~4.0.5`（0.2.1-rc.2 随包版本，已声明在 `peerDependencies`） |
+| Node.js | 22+（只用于安装器；插件本身跑在浏览器里） |
+| 客户端 | Web 平台；`dsh.client.platform = "web"`、`dsh.client.inject = []`（本包不碰任何客户端服务，只监听 DOM） |
 
-| 键 | 默认 | 说明 |
+安装（推荐用仓库根的安装器）：
+
+```powershell
+node scripts/install.mjs --only kita-terminal-autoscroll
+```
+
+手动安装：
+
+```powershell
+dsh plugin --profile web add link:<本仓库绝对路径>/packages/kita-terminal-autoscroll
+```
+
+然后把包名写进 `<DSH_HOME>/profiles/web/package.json` 的 `dsh.profile.bundles` 数组。
+
+**装完重启一次 dsh web**：本包新增一个客户端 entry，启动图随之变化，硬刷新不够
+（client bundle 的 `rev` 是启动时算的内容 sha1、响应 `immutable`）。
+
+## 配置项
+
+| 键 | 默认值 | 为空 / 不设置时 |
 |---|---|---|
-| `selectors` | `["[data-terminal]"]` | 卡片根选择器；想只作用于某一类可收窄 |
-| `stickThresholdPx` | `24` | 距底部多少像素内仍算「贴底」 |
+| `selectors` | `["[data-terminal]"]` | 回落到 `[data-terminal]`（只跟随官方 `TerminalBlock` 卡片） |
+| `stickThresholdPx` | `24` | 回落到 24px：距底 24px 内仍算「贴底」 |
 
-**新增客户端 entry 会改变启动图 ⇒ 必须重启 dsh web 才生效**（硬刷新不够：
-client bundle 的 rev 是启动时算的内容 sha1、响应 `immutable`）。
+**本版本这两项实际走代码默认值。** `lib/client.js` 的 `apply(ctx, config)` 认得这两个键，但 0.2.1-rc.2
+的客户端 runner（`loader.create({ name })`）不向客户端半下发 config —— patch 里的 `config` 只会落到 host
+半那个空实现上。运行时的生效值见「现场自检」里的 `options`。
+
+```yaml
+# 只有本机自己改过 lib/client.js 或走自建 runner 时这段才有效：
+# - insert:
+#     - id: kita-terminal-autoscroll
+#       name: 'kita-terminal-autoscroll'
+#       config:
+#         stickThresholdPx: 24
+```
 
 ## 现场自检
 
@@ -68,3 +105,12 @@ window.__kitaTerminalAutoscroll   // { engine, options }
 | 用户上滚后追加 | 保持用户位置 | `scrollTop 0`（max 704） |
 | 滚回底部后追加 | 恢复跟随 | `scrollTop 1104`（max 1104） |
 | 命令 banner（内容超出自身高度） | 不被拽走 | `headerScrollTop 0`（scrollHeight 204 > 60） |
+
+## 已知限制
+
+- 只跟随 **`scrollHeight` 增长**的容器：内容被整体替换（而不是追加）时不会滚到底。这是刻意的 ——
+  卡片内的命令 banner 就靠这一条不被拽走。
+- 判据依赖卡片根上的 `data-terminal` 属性。上游若改名，插件退化为静默 no-op（不报错、也不滚动）。
+- `selectors` / `stickThresholdPx` 在当前版本无法通过 patch 下发（见「配置项」），要改需改代码常量。
+- 不管横向滚动，也不接管用户自己的 `scrollTo` 动效。
+- 卡片首次挂载、布局还没落定时最多补 2 帧（`MAX_SETTLE_RETRIES`）；极慢的自定义字体加载后可能有一帧停在非底部。

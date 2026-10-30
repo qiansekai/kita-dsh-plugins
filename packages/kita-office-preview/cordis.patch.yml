@@ -1,0 +1,5 @@
+# kita-office-preview bundle patch: one row installing the Office document renderer.
+# No config: the host half is an empty apply, the work happens in lib/client.js.
+- insert:
+    - id: kita-office-preview
+      name: 'kita-office-preview'

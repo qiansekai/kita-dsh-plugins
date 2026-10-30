@@ -68,7 +68,59 @@ document 捕获监听。**只想打断不发送**用官方「停止生成」即�
 > 2026-10-07 变更：原先是一个 `⚡打断/插话` 按钮（点击才打断）。用户要求把"打断"变成发送的默认
 > 语义并删掉按钮 —— 手机上那一行已经有 5 个控件，按钮既占宽度又和发送按钮语义重叠。
 
+## 安装与版本要求
+
+作为 **bundle 插件**发布：`package.json` 的 `dsh.bundle.patch` 指向本包自带的 `cordis.patch.yml`，
+装进来即可，**不需要手改 profile 的 `cordis.patch.yml`**。
+
+| 项 | 要求 |
+|---|---|
+| `@deepseek-ai/dsh` | **0.2.1-rc.2**（实测版本；0.2.x 应可用，0.1.x 的插件形态不同，不保证） |
+| `@deepseek-ai/cordis` | `~4.0.5`（0.2.1-rc.2 随包版本，已声明在 `peerDependencies`） |
+| Node.js | 22+（只用于安装器与离线验证脚本；插件本身跑在浏览器里） |
+| 客户端 | Web 平台（`dsh.client.platform = "web"`） |
+
+安装（推荐用仓库根的安装器，它会自动探测 profile 并写 `dsh.profile.bundles`）：
+
+```powershell
+node scripts/install.mjs --only kita-force-steer      # 或整仓：node scripts/install.mjs
+```
+
+手动安装：
+
+```powershell
+dsh plugin --profile web add link:<本仓库绝对路径>/packages/kita-force-steer
+```
+
+然后把包名写进 `<DSH_HOME>/profiles/web/package.json` 的 `dsh.profile.bundles` 数组。
+
+**装完重启一次 dsh web。** 本包会新增一个客户端 entry（`conversation.input.right` 座位注册项），
+启动图随之变化，硬刷新不足以加载它（client bundle 的 `rev` 是启动时算的内容 sha1、响应 `immutable`）；
+只有 entry 不变、仅改 `lib/client.js` 内容时才不需要重启。
+
+`dsh.client.inject` 声明了两个官方包：`@deepseek-ai/dsh-client-ui-renderer`（提供 `slots`）
+与 `@deepseek-ai/dsh-api-session-controller`（提供 `sessions`）。两者随官方包装好，**不需要另装**。
+
+## 配置项
+
+本包**没有 config 项**：`cordis.patch.yml` 的 `insert` 行不带 `config`，host 半的 `apply` 是空实现。
+
+| 配置项 | 默认值 | 为空 / 不设置时 |
+|---|---|---|
+| （无） | — | 本包无可配置项，行为完全由用户手势决定 |
+
+行为跟随官方设置 `ui-conversation.busyEnter`，但插件**不改**它的值：
+
+| 手势 | 行为 | 可配置 |
+|---|---|---|
+| 运行中 + 普通 Enter / 主发送按钮 | 打断 + 插话（纯文本以 queue 投递） | 否 |
+| 运行中 + `Cmd/Ctrl+Enter` | 官方「相反模式」（如 `busyEnter=steer` ⇒ 排队） | 否（跟随官方设置） |
+| 未运行 / 草稿为空 / 候选菜单打开 / 输入法组合中 | 不介入 | 否 |
+
 ## 装配（4 处 + 硬刷新）
+
+> 本节是本机开发环境的双落点做法（`plugins-src` + junction）。作为 bundle 装给别人时不走这条路 ——
+> 见上面「安装与版本要求」。
 
 1. 包目录：`plugins-src/kita-force-steer`（与 monorepo `packages/kita-force-steer` 双落点）
 2. `home/profiles/web/pnpm-workspace.yaml` 的 packages 列表加一行
@@ -84,7 +136,7 @@ document 捕获监听。**只想打断不发送**用官方「停止生成」即�
 离线验证：`node scripts/verify-client.mjs`（stub 掉 ModuleLoader / document / react，断言
 注册面、cancel/steer 动词与整套手势策略：放行/拦截/时序/附件分支）。
 
-## 限制
+## 已知限制
 
 - 插话消息按 `queue` 语义作为**下一轮**进入对话，而不是塞进当前 turn 的 step 收件箱 —— 用户感知一致
   （当前 turn 已被打断），但没有"消息插进正在跑的 step"这种更细的语义；这正是可靠性的代价。

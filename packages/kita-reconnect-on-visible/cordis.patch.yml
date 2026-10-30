@@ -1,0 +1,4 @@
+# kita-reconnect-on-visible bundle patch: one client-only row, no official row to replace.
+- insert:
+    - id: kita-reconnect-on-visible
+      name: 'kita-reconnect-on-visible'

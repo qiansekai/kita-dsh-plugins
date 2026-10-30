@@ -1,15 +1,19 @@
 {
   "name": "kita-session-title-auto",
   "version": "1.0.0",
-  "description": "All-prompts session title provider + agent pin tool: keeps session titles fresh through out-of-band small-model calls, never touching the main loop's prompt-prefix cache.",
+  "description": "Session title pin tool and header mark on top of the official all-prompts title provider: pin a more accurate title at a topic switch, hand control back to automatic regeneration, and show the auto/pinned mark with the last revision's clock in the session header.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-ui-conversation"
@@ -18,17 +22,16 @@
     }
   },
   "files": [
-    "lib",
-    "README.md"
+    "lib/*.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
   ],
   "dependencies": {},
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/schemastery": "*",
-    "@deepseek-ai/dsh-session-title-llm": "^0.1.2-rc.1",
-    "@deepseek-ai/dsh-tools": "^0.1.2-rc.1",
-    "zod": "*"
+    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/dsh-tools": ">=0.2.1-rc.2 <0.3.0-0",
+    "zod": ">=4.0.0 <5.0.0"
   },
   "license": "MIT"
 }
-

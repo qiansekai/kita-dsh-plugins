@@ -120,7 +120,11 @@ export function apply(ctx, config) {
   let lastUa = ''
   let lastAt = 0
   settings.stats = () => ({ polls, lastUa, lastAt })
-  ctx.effect(() => ctx.webServer.register({
+  /**
+   * Register the read-only state route. Throws only when this deployment's
+   * webServer refuses the route; the caller degrades on that.
+   */
+  const registerRoute = () => ctx.webServer.register({
     kind: 'exact',
     path: '/kita-shell/state',
     handler: (req, res) => {
@@ -144,5 +148,13 @@ export function apply(ctx, config) {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
       res.end(JSON.stringify(body))
     },
-  }), 'kita-dsh-shell-bridge: state route')
+  })
+  // Hardening (docs/bundle-spec.md §3): a missing local precondition must not
+  // abort the profile assembly. Log it and leave the plugin inert instead of
+  // throwing out of apply().
+  try {
+    ctx.effect(registerRoute, 'kita-dsh-shell-bridge: state route')
+  } catch (error) {
+    console.log('[kita-dsh-shell-bridge] /kita-shell/state 路由注册失败，已跳过（手机通知与拖放都不可用）：' + String(error && error.message ? error.message : error))
+  }
 }

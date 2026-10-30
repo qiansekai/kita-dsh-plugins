@@ -1,0 +1,11 @@
+# kita-version-check bundle patch: one row installing the sidebar version panel
+# (host state routes + the client sidebar entry and page).
+- insert:
+    - id: kita-version-check
+      name: 'kita-version-check'
+      config:
+        registry: 'https://registry.npmjs.org'
+        channels: ['latest', 'next', 'alpha']
+        refreshIntervalMinutes: 60
+        requestTimeoutMs: 20000
+        versionListLimit: 8

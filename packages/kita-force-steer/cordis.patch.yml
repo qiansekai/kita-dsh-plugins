@@ -1,0 +1,5 @@
+# kita-force-steer bundle patch: one client-only row, no official row to replace.
+# The host half is an empty apply; all behavior lives in lib/client.js.
+- insert:
+    - id: kita-force-steer
+      name: 'kita-force-steer'

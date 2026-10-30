@@ -5,10 +5,10 @@ window.__ModuleLoader__.load({
 		var exports = module.exports;
 		Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
 		let _deepseek_ai_dsh_client_store = require("@deepseek-ai/dsh-client-store");
+		let _deepseek_ai_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
 		let _deepseek_ai_cordis = require("@deepseek-ai/cordis");
 		let react_jsx_runtime = require("react/jsx-runtime");
 		let react = require("react");
-		let _deepseek_ai_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
 		//#region lib/types/client/contract/slots.js
 		/**
 		* Bind the row's render occurrence into the entries' `useMenuOpenState` hook:
@@ -30,10 +30,8 @@ window.__ModuleLoader__.load({
 				searchRequest: 0,
 				addRequested: false,
 				directoryBusy: false,
-				renameTarget: null,
-				forkError: null
+				renameTarget: null
 			});
-			let forkErrorSeq = 0;
 			return {
 				state,
 				search: () => {
@@ -74,22 +72,6 @@ window.__ModuleLoader__.load({
 						...state.getSnapshot(),
 						renameTarget: null
 					});
-				},
-				forkFailed: (reason) => {
-					forkErrorSeq += 1;
-					state.set({
-						...state.getSnapshot(),
-						forkError: {
-							reason,
-							seq: forkErrorSeq
-						}
-					});
-				},
-				dismissForkError: () => {
-					state.set({
-						...state.getSnapshot(),
-						forkError: null
-					});
 				}
 			};
 		}
@@ -100,8 +82,9 @@ window.__ModuleLoader__.load({
 		* @param navigation - session creation and forking from the pointer controls' navigation service.
 		* @param controls - browser-owned opening requests.
 		* @param archiveSession - shared archive action, including running-work confirmation and notices.
+		* @param reportForkFailure - publish a classified failure through the frame-wide notice channel.
 		*/
-		function installWorkspaceShortcuts(ctx, navigation, controls, archiveSession) {
+		function installWorkspaceShortcuts(ctx, navigation, controls, archiveSession, reportForkFailure) {
 			const t = ctx.locale.bind("workspace");
 			const current = () => Object.values(ctx.sessions.list.getSnapshot().byId).find((row) => (row.retainedBy.mainView ?? 0) > 0);
 			const addReason = () => ctx.slots.entries("sidebar.workspaces.directoryFlow").length === 0 ? t("shortcut.noPicker") : controls.state.getSnapshot().directoryBusy ? t("shortcut.directoryBusy") : null;
@@ -184,7 +167,7 @@ window.__ModuleLoader__.load({
 					run: () => {
 						navigation.forkSession(target.id).catch((error) => {
 							const unavailable = error instanceof Error && error.name === "SessionForkError" && error.rpcError.code === "session/fork-unavailable";
-							controls.forkFailed(unavailable ? "unavailable" : "failed");
+							reportForkFailure(unavailable ? "unavailable" : "failed");
 							if (!unavailable) console.warn("session fork rejected:", error);
 						});
 					}
@@ -1380,6 +1363,7 @@ window.__ModuleLoader__.load({
 			sessions;
 			view;
 			notify;
+			/** The latest in-flight connection per Workspace; a request joins it only when both name the same preset. */
 			connecting = /* @__PURE__ */ new Map();
 			lifetime = new AbortController();
 			selection = (0, _deepseek_ai_dsh_client_store.createSnapshotStore)({}, { persist: { name: "dsh.sessions.current" } });
@@ -1410,47 +1394,84 @@ window.__ModuleLoader__.load({
 					};
 				}, "ui-workspace: Workspace navigation policy");
 			}
-			connectWorkspace(workspaceId) {
-				return this.connectBlank(workspaceId, true);
+			connectWorkspace(workspaceId, options = {}) {
+				return this.connectBlank(workspaceId, options);
 			}
+			/**
+			* @param reuse - preset for the reused or created blank; absent creates a fresh Session.
+			*/
 			async connectBlank(workspaceId, reuse) {
 				const workspace = this.workspaces.list.getSnapshot().items.find((item) => item.workspaceId === workspaceId);
 				if (workspace === void 0) throw new Error(`uiWorkspace.connectWorkspace: unknown workspace ${workspaceId}`);
-				if (!reuse) return this.sessions.create({ workspaceId });
+				if (reuse === void 0) return this.sessions.create({ workspaceId });
 				const inflight = this.connecting.get(workspaceId);
-				if (inflight !== void 0) return inflight;
-				const attempt = this.reuseOrCreateBlank(workspace).finally(() => {
-					this.connecting.delete(workspaceId);
+				if (inflight !== void 0 && inflight.agentPreset === reuse.agentPreset) return inflight.attempt;
+				const attempt = this.createInWorkspace(workspace, reuse).finally(() => {
+					if (this.connecting.get(workspaceId)?.attempt === attempt) this.connecting.delete(workspaceId);
 				});
-				this.connecting.set(workspaceId, attempt);
+				this.connecting.set(workspaceId, {
+					agentPreset: reuse.agentPreset,
+					attempt
+				});
 				return attempt;
 			}
-			reuseOrCreateBlank(workspace) {
+			createInWorkspace(workspace, options) {
 				const archived = this.workspaces.list.getSnapshot().archivedSessionIds;
 				const sessions = this.sessions.list.getSnapshot();
-				for (const id of sessions.ids) {
+				const blank = sessions.ids.find((id) => {
 					const summary = sessions.byId[id];
-					if (summary === void 0 || !summary.blank || summary.cwd !== workspace.path || !workspace.sessionIds.includes(id) || archived.includes(id)) continue;
-					return this.reuseBlank(workspace.workspaceId, id);
-				}
-				return this.sessions.create({ workspaceId: workspace.workspaceId });
+					return summary !== void 0 && summary.blank && summary.cwd === workspace.path && workspace.sessionIds.includes(id) && !archived.includes(id);
+				});
+				return this.createNamed({
+					workspaceId: workspace.workspaceId,
+					...blank === void 0 ? {} : { sessionId: blank },
+					...options.agentPreset === void 0 ? {} : { agentPreset: options.agentPreset }
+				});
 			}
-			async reuseBlank(workspaceId, sessionId) {
+			/**
+			* Create through the Host. A named blank the Host declined may still read as
+			* blank from stale cached list metadata, which hides it from the Session tree;
+			* its projections are reloaded so the row reflects its log.
+			*/
+			async createNamed(request) {
+				const sessionId = await this.sessions.create(request);
+				const named = request.sessionId;
+				if (named !== void 0 && named !== sessionId) this.sessions.refreshProjections(named).catch((reason) => {
+					console.warn("declined blank Session projection reload failed:", reason);
+				});
+				return sessionId;
+			}
+			/**
+			* Reopen a saved blank Session under the preset its log recorded, or under
+			* the Host default once that preset no longer activates. Listed values are
+			* cached hints that can lag the log after an unclean Host exit, so the
+			* Session's projections are reloaded before the preset is read; a Session
+			* that still awaits a format migration reloads only those cached hints.
+			*/
+			async restoreBlank(workspaceId, sessionId) {
+				await this.sessions.refreshProjections(sessionId);
+				const recorded = this.sessions.list.getSnapshot().byId[sessionId]?.projectionValues?.agentPreset;
+				const request = {
+					workspaceId,
+					sessionId
+				};
+				if (typeof recorded !== "string") return this.createNamed(request);
 				try {
-					return await this.sessions.create({
-						workspaceId,
-						sessionId
+					return await this.createNamed({
+						...request,
+						agentPreset: recorded
 					});
 				} catch (error) {
-					if (sessionCreateErrorOf(error)?.rpcError.code !== "session/writer-held") throw error;
-					return this.sessions.create({ workspaceId });
+					const code = sessionCreateErrorOf(error)?.rpcError.code;
+					if (code !== "agent-preset/not-found" && code !== "agent-preset/invalid") throw error;
+					return this.createNamed(request);
 				}
 			}
 			openSession(target) {
 				this.replaceMain(target, this.lifetime.signal, "reveal");
 			}
-			openWorkspace(workspaceId, beforeOpen) {
-				return this.openWorkspaceSession(workspaceId, beforeOpen, true);
+			openWorkspace(workspaceId, beforeOpen, options = {}) {
+				return this.openWorkspaceSession(workspaceId, beforeOpen, options);
 			}
 			async openWorkspaceSession(workspaceId, beforeOpen, reuse) {
 				const navigation = AbortSignal.any([this.ctx.layout.beginNavigation(), this.lifetime.signal]);
@@ -1476,7 +1497,8 @@ window.__ModuleLoader__.load({
 				});
 			}
 			startSession(workspaceId, options) {
-				const draftOptions = options === void 0 ? void 0 : { ...options };
+				const { agentPreset, ...draft } = options ?? {};
+				const draftOptions = options === void 0 ? void 0 : draft;
 				const initializeDraft = draftOptions !== void 0 && (draftOptions.prompt !== void 0 || draftOptions.clearPreviousDraft === true);
 				const workspace = this.workspaces.list.getSnapshot();
 				const sessions = this.sessions.list.getSnapshot();
@@ -1495,11 +1517,11 @@ window.__ModuleLoader__.load({
 					this.clearMain();
 					return;
 				}
-				(draftOptions === void 0 ? this.openWorkspaceSession(target, void 0, false) : this.openWorkspace(target, initializeDraft ? (id) => {
+				(draftOptions === void 0 ? this.openWorkspaceSession(target, void 0, void 0) : this.openWorkspace(target, initializeDraft ? (id) => {
 					const binding = this.sessions.binding(id);
 					if (binding === void 0) this.draftPreparationFailed();
 					this.prepareDraft(binding, draftOptions);
-				} : void 0)).catch((reason) => {
+				} : void 0, agentPreset === void 0 ? {} : { agentPreset })).catch((reason) => {
 					console.warn("new session failed:", reason);
 				});
 			}
@@ -1594,7 +1616,7 @@ window.__ModuleLoader__.load({
 				}
 				const navigation = AbortSignal.any([this.ctx.layout.beginNavigation(), this.lifetime.signal]);
 				let sessionId;
-				if (summary !== void 0 && workspace !== void 0 && summary.cwd === workspace.path && !workspaces.archivedSessionIds.includes(summary.id)) sessionId = await this.reuseBlank(workspace.workspaceId, summary.id);
+				if (summary !== void 0 && workspace !== void 0 && summary.cwd === workspace.path && !workspaces.archivedSessionIds.includes(summary.id)) sessionId = await this.restoreBlank(workspace.workspaceId, summary.id);
 				let target = workspace?.workspaceId ?? recentWorkspace(workspaces.items, sessions.byId);
 				if (target === void 0 && workspaces.items.length === 0 && sessions.ids.length === 0) {
 					const prepared = await this.initializeDefaultWorkspace(navigation);
@@ -1716,7 +1738,7 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 		//#region \0dsh-css:/home/runner/work/deepseek-harness/deepseek-harness/packages/client/ui-workspace/src/client/rows/Rows.module.css.mjs
-		const css$3 = ".YDXeBa_projectRow,.YDXeBa_sessionRow{border-radius:var(--dsw-radius-md);padding:0 8px;cursor:pointer;user-select:none;color:var(--dsw-alias-label-primary);align-items:center;gap:6px;padding-inline-start:calc(8px + var(--dsh-workspace-indent,0px));display:flex}.YDXeBa_projectRow:hover,.YDXeBa_sessionRow:hover,.YDXeBa_sessionRow.YDXeBa_selected{background:var(--dsw-alias-interactive-bg-hover)}.YDXeBa_searchResultRow{box-sizing:border-box;border-radius:var(--dsw-radius-lg);cursor:pointer;text-align:left;width:100%;min-height:48px;color:var(--dsw-alias-label-primary);background:0 0;border:none;flex-direction:column;align-items:stretch;padding:4px 8px;display:flex}.YDXeBa_searchResultRow:hover,.YDXeBa_searchResultRow.YDXeBa_selected{background:var(--dsw-alias-interactive-bg-hover)}.YDXeBa_searchResultHeading{align-items:center;min-width:0;display:flex}.YDXeBa_searchResultTitle{text-overflow:ellipsis;white-space:nowrap;flex:0 auto;min-width:0;margin-left:4px;font-size:14px;line-height:20px;overflow:hidden}.YDXeBa_searchResultMeta{align-items:center;gap:6px;min-width:0;margin-left:20px;display:flex}.YDXeBa_searchResultWorkspace,.YDXeBa_searchResultSnippet{text-overflow:ellipsis;white-space:nowrap;font-size:12px;line-height:17px;overflow:hidden}.YDXeBa_searchResultWorkspace{max-width:40%;color:var(--dsw-alias-label-tertiary);flex:none}.YDXeBa_searchResultWorkspace:only-child{max-width:100%}.YDXeBa_searchResultSnippet{min-width:0;color:var(--dsw-alias-label-secondary);flex:1}.YDXeBa_projectRow{box-sizing:border-box;align-items:center;height:34px}.YDXeBa_projectRow .YDXeBa_rowActions{height:20px}.YDXeBa_sessionRow{gap:0;height:32px}.YDXeBa_sessionRow .YDXeBa_title{margin:0 6px 0 4px}.YDXeBa_slot{width:16px;height:20px;color:var(--dsw-alias-label-tertiary);flex:none;justify-content:center;align-items:center;display:inline-flex}.YDXeBa_visuallyHidden{clip:rect(0 0 0 0);white-space:nowrap;width:1px;height:1px;position:absolute;overflow:hidden}.YDXeBa_folderActive{color:var(--dsw-alias-state-business-primary)}.YDXeBa_projectRow .YDXeBa_chevron{display:none}.YDXeBa_projectRow:hover .YDXeBa_chevron{display:inline-flex}.YDXeBa_projectRow:hover .YDXeBa_folder{display:none}.YDXeBa_arrow{transition:transform .15s var(--ds-ease-in-out)}.YDXeBa_arrowOpen{transform:rotate(90deg)}.YDXeBa_projectText{flex-direction:column;flex:1;gap:2px;min-width:0;display:flex}.YDXeBa_title{text-overflow:ellipsis;white-space:nowrap;min-width:0;font-size:14px;line-height:20px;overflow:hidden}.YDXeBa_renameInput{border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-button-elevated-fill);min-width:0;color:inherit;outline:none;padding:0 2px;font-size:14px;line-height:20px}.YDXeBa_sessionRow .YDXeBa_title{flex:1}.YDXeBa_sessionRow .YDXeBa_title[data-scrolled]{mask-image:linear-gradient(90deg,#0000,#000 12px)}.YDXeBa_sessionRow .YDXeBa_title[data-clipped]{mask-image:linear-gradient(270deg,#0000,#000 12px)}.YDXeBa_sessionRow .YDXeBa_title[data-scrolled][data-clipped]{mask-image:linear-gradient(90deg,#0000,#000 12px calc(100% - 12px),#0000)}.YDXeBa_meta{text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:20px;overflow:hidden}.YDXeBa_time{color:var(--dsw-alias-label-tertiary);flex:none;font-size:10px;line-height:16px}.YDXeBa_pinIndicator{width:16px;height:20px;color:var(--dsw-alias-label-caption);flex:none;justify-content:center;align-items:center;margin-left:6px;display:inline-flex}.YDXeBa_sessionRow.YDXeBa_archived .YDXeBa_title,.YDXeBa_searchResultRow.YDXeBa_archived .YDXeBa_searchResultTitle,.YDXeBa_searchResultRow.YDXeBa_archived .YDXeBa_searchResultWorkspace,.YDXeBa_searchResultRow.YDXeBa_archived .YDXeBa_searchResultSnippet{color:var(--dsw-alias-label-caption)}.YDXeBa_dot{flex:none}.YDXeBa_rowActions{flex:none;align-items:center;gap:10px;display:inline-flex}.YDXeBa_rowActions .kitaRowBtn{cursor:pointer;width:24px;height:24px;color:var(--dsw-alias-label-secondary);background:0 0;border:none;border-radius:6px;align-items:center;justify-content:center;padding:0;display:inline-flex}.YDXeBa_rowActions .kitaRowBtn:hover{background:var(--dsw-alias-interactive-bg-hover)}.YDXeBa_projectRow:hover .YDXeBa_rowActions,.YDXeBa_sessionRow:hover .YDXeBa_rowActions,.YDXeBa_searchResultRow:hover .YDXeBa_rowActions,.YDXeBa_projectRow.YDXeBa_menuOpen .YDXeBa_rowActions,.YDXeBa_sessionRow.YDXeBa_menuOpen .YDXeBa_rowActions{display:inline-flex}.YDXeBa_searchResultHeading .YDXeBa_rowActions{margin-left:auto}.YDXeBa_sessionRow:hover .YDXeBa_time,.YDXeBa_sessionRow.YDXeBa_menuOpen .YDXeBa_time,.YDXeBa_sessionRow:hover .YDXeBa_pinIndicator,.YDXeBa_sessionRow.YDXeBa_menuOpen .YDXeBa_pinIndicator{display:none}@media (hover:hover){.YDXeBa_sessionRow:hover .YDXeBa_title,.YDXeBa_sessionRow.YDXeBa_menuOpen .YDXeBa_title{text-overflow:clip}}.YDXeBa_projectRow.YDXeBa_menuOpen,.YDXeBa_sessionRow.YDXeBa_menuOpen{background:var(--dsw-alias-interactive-bg-hover)}.YDXeBa_sessionRow.YDXeBa_dropBefore,.YDXeBa_sessionRow.YDXeBa_dropAfter{position:relative}.YDXeBa_sessionRow.YDXeBa_dropBefore:before,.YDXeBa_sessionRow.YDXeBa_dropAfter:after{content:\"\";z-index:1;background:linear-gradient(55deg, transparent calc(50% - 1px), var(--dsw-alias-state-business-primary) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px)) 0 0 / 5px 7px no-repeat, linear-gradient(125deg, transparent calc(50% - 1px), var(--dsw-alias-state-business-primary) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px)) 0 5px / 5px 7px no-repeat, linear-gradient(var(--dsw-alias-state-business-primary) 0 0) 4px 5px / calc(100% - 4px) 2px no-repeat;pointer-events:none;height:12px;position:absolute;left:0;right:4px}.YDXeBa_sessionRow.YDXeBa_dropBefore:before{top:-7px}.YDXeBa_sessionRow.YDXeBa_dropAfter:after{bottom:-7px}.YDXeBa_hoverContent{flex-direction:column;gap:8px;display:flex}.YDXeBa_hoverTitle{color:#fff;overflow-wrap:break-word;font-size:14px;line-height:20px}.YDXeBa_hoverPath{color:#cfd3d6;word-break:break-all;font-size:12px;line-height:16px}.YDXeBa_hoverTime{color:#cfd3d6;font-size:12px;line-height:16px}.YDXeBa_hoverStatus{color:#adb2b8;align-items:center;gap:8px;font-size:12px;line-height:20px;display:flex}.YDXeBa_hoverArchived svg{flex-shrink:0;margin:0 -4px}.YDXeBa_iconButton{border-radius:var(--dsw-radius-xs);cursor:pointer;width:16px;height:16px;color:var(--dsw-alias-label-tertiary);background:0 0;border:none;flex:none;justify-content:center;align-items:center;padding:0;display:inline-flex}.YDXeBa_iconButton:hover{color:var(--dsw-alias-label-primary)}.YDXeBa_chevron{color:var(--dsw-alias-label-caption)}@media (prefers-reduced-motion:reduce){.YDXeBa_arrow{transition:none;animation:none}}[data-width-handle]{display:none!important}";
+		const css$3 = ".YDXeBa_projectRow,.YDXeBa_sessionRow{border-radius:var(--dsw-radius-md);padding:0 8px;cursor:pointer;user-select:none;color:var(--dsw-alias-label-primary);align-items:center;gap:6px;padding-inline-start:calc(8px + var(--dsh-workspace-indent,0px));display:flex}.YDXeBa_projectRow:hover,.YDXeBa_sessionRow:hover,.YDXeBa_sessionRow.YDXeBa_selected{background:var(--dsw-alias-interactive-bg-hover)}.YDXeBa_searchResultRow{box-sizing:border-box;border-radius:var(--dsw-radius-lg);cursor:pointer;text-align:left;width:100%;min-height:48px;color:var(--dsw-alias-label-primary);background:0 0;border:none;flex-direction:column;align-items:stretch;padding:4px 8px;display:flex}.YDXeBa_searchResultRow:hover,.YDXeBa_searchResultRow.YDXeBa_selected{background:var(--dsw-alias-interactive-bg-hover)}.YDXeBa_searchResultHeading{align-items:center;min-width:0;display:flex}.YDXeBa_searchResultTitle{text-overflow:ellipsis;white-space:nowrap;flex:0 auto;min-width:0;margin-left:4px;font-size:14px;line-height:20px;overflow:hidden}.YDXeBa_searchResultMeta{align-items:center;gap:6px;min-width:0;margin-left:20px;display:flex}.YDXeBa_searchResultWorkspace,.YDXeBa_searchResultSnippet{text-overflow:ellipsis;white-space:nowrap;font-size:12px;line-height:17px;overflow:hidden}.YDXeBa_searchResultWorkspace{max-width:40%;color:var(--dsw-alias-label-tertiary);flex:none}.YDXeBa_searchResultWorkspace:only-child{max-width:100%}.YDXeBa_searchResultSnippet{min-width:0;color:var(--dsw-alias-label-secondary);flex:1}.YDXeBa_projectRow{box-sizing:border-box;align-items:center;height:34px}.YDXeBa_projectRow .YDXeBa_rowActions{height:20px}.YDXeBa_sessionRow{gap:0;height:32px}.YDXeBa_sessionRow .YDXeBa_title{margin:0 6px 0 4px}.YDXeBa_slot{width:16px;height:20px;color:var(--dsw-alias-label-tertiary);flex:none;justify-content:center;align-items:center;display:inline-flex}.YDXeBa_visuallyHidden{clip:rect(0 0 0 0);white-space:nowrap;width:1px;height:1px;position:absolute;overflow:hidden}.YDXeBa_folderActive{color:var(--dsw-alias-state-business-primary)}.YDXeBa_projectRow .YDXeBa_chevron{display:none}.YDXeBa_projectRow:hover .YDXeBa_chevron{display:inline-flex}.YDXeBa_projectRow:hover .YDXeBa_folder{display:none}.YDXeBa_arrow{transition:transform .15s var(--ds-ease-in-out)}.YDXeBa_arrowOpen{transform:rotate(90deg)}.YDXeBa_projectText{flex-direction:column;flex:1;gap:2px;min-width:0;display:flex}.YDXeBa_title{text-overflow:ellipsis;white-space:nowrap;min-width:0;font-size:14px;line-height:20px;overflow:hidden}.YDXeBa_renameInput{border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-button-elevated-fill);min-width:0;color:inherit;outline:none;padding:0 2px;font-size:14px;line-height:20px}.YDXeBa_sessionRow .YDXeBa_title{flex:1}.YDXeBa_sessionRow .YDXeBa_title[data-scrolled]{mask-image:linear-gradient(90deg,#0000,#000 12px)}.YDXeBa_sessionRow .YDXeBa_title[data-clipped]{mask-image:linear-gradient(270deg,#0000,#000 12px)}.YDXeBa_sessionRow .YDXeBa_title[data-scrolled][data-clipped]{mask-image:linear-gradient(90deg,#0000,#000 12px calc(100% - 12px),#0000)}.YDXeBa_meta{text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:20px;overflow:hidden}.YDXeBa_time{color:var(--dsw-alias-label-tertiary);flex:none;font-size:10px;line-height:16px}.YDXeBa_pinIndicator{width:16px;height:20px;color:var(--dsw-alias-label-caption);flex:none;justify-content:center;align-items:center;margin-left:6px;display:inline-flex}.YDXeBa_sessionRow.YDXeBa_archived .YDXeBa_title,.YDXeBa_searchResultRow.YDXeBa_archived .YDXeBa_searchResultTitle,.YDXeBa_searchResultRow.YDXeBa_archived .YDXeBa_searchResultWorkspace,.YDXeBa_searchResultRow.YDXeBa_archived .YDXeBa_searchResultSnippet{color:var(--dsw-alias-label-caption)}.YDXeBa_dot{flex:none}.YDXeBa_rowActions{flex:none;align-items:center;gap:15px;display:inline-flex}.YDXeBa_rowActions .kitaRowBtn{cursor:pointer;width:24px;height:24px;color:var(--dsw-alias-label-secondary);background:0 0;border:none;border-radius:6px;align-items:center;justify-content:center;padding:0;display:inline-flex}.YDXeBa_rowActions .kitaRowBtn:hover{background:var(--dsw-alias-interactive-bg-hover)}.YDXeBa_projectRow:hover .YDXeBa_rowActions,.YDXeBa_sessionRow:hover .YDXeBa_rowActions,.YDXeBa_searchResultRow:hover .YDXeBa_rowActions,.YDXeBa_projectRow.YDXeBa_menuOpen .YDXeBa_rowActions,.YDXeBa_sessionRow.YDXeBa_menuOpen .YDXeBa_rowActions{display:inline-flex}.YDXeBa_searchResultHeading .YDXeBa_rowActions{margin-left:auto}.YDXeBa_sessionRow:hover .YDXeBa_time,.YDXeBa_sessionRow.YDXeBa_menuOpen .YDXeBa_time,.YDXeBa_sessionRow:hover .YDXeBa_pinIndicator,.YDXeBa_sessionRow.YDXeBa_menuOpen .YDXeBa_pinIndicator{display:none}@media (hover:hover){.YDXeBa_sessionRow:hover .YDXeBa_title,.YDXeBa_sessionRow.YDXeBa_menuOpen .YDXeBa_title{text-overflow:clip}}.YDXeBa_projectRow.YDXeBa_menuOpen,.YDXeBa_sessionRow.YDXeBa_menuOpen{background:var(--dsw-alias-interactive-bg-hover)}.YDXeBa_sessionRow.YDXeBa_dropBefore,.YDXeBa_sessionRow.YDXeBa_dropAfter{position:relative}.YDXeBa_sessionRow.YDXeBa_dropBefore:before,.YDXeBa_sessionRow.YDXeBa_dropAfter:after{content:\"\";z-index:1;background:linear-gradient(55deg, transparent calc(50% - 1px), var(--dsw-alias-state-business-primary) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px)) 0 0 / 5px 7px no-repeat, linear-gradient(125deg, transparent calc(50% - 1px), var(--dsw-alias-state-business-primary) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px)) 0 5px / 5px 7px no-repeat, linear-gradient(var(--dsw-alias-state-business-primary) 0 0) 4px 5px / calc(100% - 4px) 2px no-repeat;pointer-events:none;height:12px;position:absolute;left:0;right:4px}.YDXeBa_sessionRow.YDXeBa_dropBefore:before{top:-7px}.YDXeBa_sessionRow.YDXeBa_dropAfter:after{bottom:-7px}.YDXeBa_hoverContent{flex-direction:column;gap:8px;display:flex}.YDXeBa_hoverTitle{color:#fff;overflow-wrap:break-word;font-size:14px;line-height:20px}.YDXeBa_hoverPath{color:#cfd3d6;word-break:break-all;font-size:12px;line-height:16px}.YDXeBa_hoverTime{color:#cfd3d6;font-size:12px;line-height:16px}.YDXeBa_hoverStatus{color:#adb2b8;align-items:center;gap:8px;font-size:12px;line-height:20px;display:flex}.YDXeBa_hoverArchived svg{flex-shrink:0;margin:0 -4px}.YDXeBa_iconButton{border-radius:var(--dsw-radius-xs);cursor:pointer;width:16px;height:16px;color:var(--dsw-alias-label-tertiary);background:0 0;border:none;flex:none;justify-content:center;align-items:center;padding:0;display:inline-flex}.YDXeBa_iconButton:hover{color:var(--dsw-alias-label-primary)}.YDXeBa_chevron{color:var(--dsw-alias-label-caption)}@media (prefers-reduced-motion:reduce){.YDXeBa_arrow{transition:none;animation:none}}[data-width-handle]{display:none!important}";
 		const tagId$3 = "@deepseek-ai/dsh-client-ui-workspace/Rows.module.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$3) + "]") === null) {
 			const tag = document.createElement("style");
@@ -2002,6 +2024,7 @@ window.__ModuleLoader__.load({
 							side: "bottom",
 							align: "end",
 							delayMs: 500,
+							portal: true,
 							children: (0, react_jsx_runtime.jsx)("button", {
 								type: "button",
 								className: Rows_module_css_default.iconButton,
@@ -2027,6 +2050,7 @@ window.__ModuleLoader__.load({
 					t
 				}),
 				openDelayMs: 800,
+				grouped: true,
 				disabled: menuOpen,
 				copyText: row.cwd,
 				copyLabel: t("copy"),
@@ -2181,6 +2205,7 @@ window.__ModuleLoader__.load({
 								side: "bottom",
 								align: "end",
 								delayMs: 500,
+								portal: true,
 								children: (0, react_jsx_runtime.jsx)("button", {
 									type: "button",
 									className: Rows_module_css_default.iconButton,
@@ -2335,6 +2360,7 @@ window.__ModuleLoader__.load({
 					t
 				}),
 				openDelayMs: 800,
+				grouped: true,
 				disabled: menuOpen || drag?.active === true,
 				copyText: row.blank || row.title === "" ? void 0 : row.title,
 				copyLabel: t("copy"),
@@ -2804,21 +2830,45 @@ window.__ModuleLoader__.load({
 		const SEARCH_DEBOUNCE_MS = 250;
 		/** `session.search` wire bound, measured in JavaScript UTF-16 code units. */
 		const SEARCH_QUERY_MAX_CODE_UNITS = 500;
-		/** Idle Session rows visible per Workspace before the local overflow control. */
-		const COLLAPSED_SESSION_LIMIT = 5;
-		/** Keep provisional and running rows outside the idle-session quota, including parents with running children. */
-		function collapsedSessionRows(sessions, limit = COLLAPSED_SESSION_LIMIT) {
-			let idleCount = 0;
+		/** Non-blank Session rows visible per Workspace while no Session raises its watermark. */
+		const SESSION_WATERMARK_BASE = 5;
+		/** Highest watermark that attention-bearing Sessions raise automatically; Show more and search reveals may exceed it. */
+		const SESSION_WATERMARK_AUTO_MAX = 50;
+		/** Show the blank row plus the first `watermark` non-blank rows, in list order. */
+		function watermarkRows(sessions, watermark) {
+			let count = 0;
 			const rows = sessions.filter((session) => {
-				if (session.blank || session.running || session.runningSubagentCount > 0) return true;
-				if (idleCount >= limit) return false;
-				idleCount += 1;
-				return true;
+				if (session.blank) return true;
+				count += 1;
+				return count <= watermark;
 			});
 			return {
 				rows,
 				hiddenCount: sessions.length - rows.length
 			};
+		}
+		/**
+		* Smallest watermark that covers every non-blank row within the automatic maximum that is running, has a running
+		* child, awaits the user, carries an unread completion, or is current, and the reveal target at any position.
+		*/
+		function requiredWatermark(sessions, current, revealSessionId) {
+			let index = 0;
+			let required = 0;
+			for (const session of sessions) {
+				if (session.blank) continue;
+				index += 1;
+				if (index <= SESSION_WATERMARK_AUTO_MAX && (session.running || session.runningSubagentCount > 0 || session.pendingInteraction !== void 0 || session.completed || session.id === current) || session.id === revealSessionId) required = index;
+			}
+			return required;
+		}
+		/** Raise each listed group's watermark to its requirement; returns `marks` itself when nothing rises. */
+		function raiseWatermarks(marks, required) {
+			let raised = marks;
+			for (const [key, watermark] of required) if (watermark > (raised[key] ?? SESSION_WATERMARK_BASE)) raised = {
+				...raised,
+				[key]: watermark
+			};
+			return raised;
 		}
 		/** Keep controlled input and RPC payload inside the session.search wire contract. */
 		function sanitizeSearchQuery(value) {
@@ -3000,7 +3050,7 @@ window.__ModuleLoader__.load({
 				]
 			});
 		}
-		/** The scrolling session tree; unmounting drops the sessions subscription and local row limits. */
+		/** The scrolling session tree; unmounting drops the sessions subscription and the session watermarks. */
 		function SessionTree({ list, useSessionStatus, startSession, open, workspaces, ungroupedSessionIds, rowState, onLeaveArchivedOnly, workspaceReady, animationResetKey, usePanelInfo, onRenameRequest, onDeleteRequest, onSessionRenameRequest, renderSlot, insertWorkspaceBefore, nestWorkspaces, groupExpansion, setGroupExpanded, setSessionOrder, home, t, revealSessionId, onSessionRevealed, shortcuts }) {
 			const stableOpen = stableCallback(open);
 			const stableRenameRequest = stableCallback(onSessionRenameRequest);
@@ -3009,7 +3059,8 @@ window.__ModuleLoader__.load({
 			const statuses = useSessionStatus((s) => s);
 			const current = panelActive ? void 0 : Object.values(list.byId).find((session) => (session.retainedBy.mainView ?? 0) > 0)?.id;
 			const revealGroup = revealSessionId === void 0 || !workspaceReady ? void 0 : owningGroupKey(workspaces, revealSessionId);
-			const [sessionLimits, setSessionLimits] = (0, react.useState)({});
+			const [storedWatermarks, setStoredWatermarks] = (0, react.useState)({});
+			const [watermarkMotionKey, setWatermarkMotionKey] = (0, react.useState)(0);
 			const [drag, setDrag] = (0, react.useState)(null);
 			const sessionDropCommitted = (0, react.useRef)(false);
 			const [workspaceDrag, setWorkspaceDrag] = (0, react.useState)(null);
@@ -3067,20 +3118,24 @@ window.__ModuleLoader__.load({
 				revealGroup,
 				setGroupExpanded
 			]);
-			(0, react.useEffect)(() => {
-				if (revealSessionId === void 0 || revealGroup === void 0) return;
-				const group = groups.find((candidate) => candidate.key === revealGroup);
-				if (group === void 0 || !group.expanded || !group.sessions.some((row) => row.id === revealSessionId)) return;
-				if (collapsedSessionRows(group.sessions).rows.some((row) => row.id === revealSessionId)) return;
-				setSessionLimits((limits) => limits[revealGroup] === Infinity ? limits : {
-					...limits,
-					[revealGroup]: Infinity
-				});
-			}, [
-				groups,
-				revealGroup,
-				revealSessionId
-			]);
+			const baselines = new Map(groups.map((group) => [group.key, Math.max(SESSION_WATERMARK_BASE, requiredWatermark(group.sessions, current, group.key === revealGroup ? revealSessionId : void 0))]));
+			const foldedKeys = new Set(groups.filter((group) => !group.expanded).map((group) => group.key));
+			const underFoldedAncestor = (key) => {
+				for (let owner = parents.get(key); owner !== void 0; owner = parents.get(owner)) if (foldedKeys.has(owner)) return true;
+				return false;
+			};
+			const requiredWatermarks = new Map([...baselines].filter(([key]) => !underFoldedAncestor(key)));
+			const sessionWatermarks = raiseWatermarks(storedWatermarks, requiredWatermarks);
+			if (sessionWatermarks !== storedWatermarks) setStoredWatermarks((marks) => raiseWatermarks(marks, requiredWatermarks));
+			const dropWatermarks = (drop) => {
+				if (!Object.keys(storedWatermarks).some(drop)) return;
+				setStoredWatermarks((marks) => Object.fromEntries(Object.entries(marks).filter(([key]) => !drop(key))));
+				setWatermarkMotionKey((key) => key + 1);
+			};
+			const withinGroup = (key, root) => {
+				for (let owner = key; owner !== void 0; owner = parents.get(owner)) if (owner === root) return true;
+				return false;
+			};
 			const now = Math.floor(Date.now() / 3e4) * 3e4;
 			const commitSessionDrag = (activeDrag, over) => {
 				if (sessionDropCommitted.current) return;
@@ -3091,7 +3146,7 @@ window.__ModuleLoader__.load({
 				if (over.id === activeDrag.sessionId) return;
 				const accountSessionIds = activeDrag.accountKey === "" ? ungroupedSessionIds : workspaces.find((workspace) => workspace.workspaceId === activeDrag.accountKey)?.sessionIds;
 				if (accountSessionIds === void 0) return;
-				const renderedSessions = collapsedSessionRows(group.sessions, sessionLimits[group.key]).rows;
+				const renderedSessions = watermarkRows(group.sessions, sessionWatermarks[group.key] ?? SESSION_WATERMARK_BASE).rows;
 				const nextOrder = sessionDragOrder(accountSessionIds, renderedSessions, activeDrag, over);
 				if (nextOrder !== void 0) setSessionOrder(activeDrag.accountKey, nextOrder);
 			};
@@ -3131,8 +3186,9 @@ window.__ModuleLoader__.load({
 				const workspaceId = group.workspaceId;
 				const children = childrenByParent.get(group.key) ?? [];
 				const compatibleDrag = workspaceDrag !== null && parents.get(workspaceDrag.workspaceId) === parents.get(group.key);
-				const collapsed = collapsedSessionRows(group.sessions);
-				const visible = collapsedSessionRows(group.sessions, sessionLimits[group.key]);
+				const watermark = sessionWatermarks[group.key] ?? SESSION_WATERMARK_BASE;
+				const collapsed = watermarkRows(group.sessions, baselines.get(group.key) ?? SESSION_WATERMARK_BASE);
+				const visible = watermarkRows(group.sessions, watermark);
 				const sessionsExpanded = visible.hiddenCount === 0;
 				rowKeys.push(`workspace:${group.key}`);
 				const childRows = group.expanded ? children.map((child) => renderGroup(child, depth + 1)) : [];
@@ -3204,10 +3260,7 @@ window.__ModuleLoader__.load({
 							home,
 							t,
 							onToggle: () => {
-								if (group.expanded) setSessionLimits((limits) => ({
-									...limits,
-									[group.key]: COLLAPSED_SESSION_LIMIT
-								}));
+								if (group.expanded) dropWatermarks((key) => withinGroup(key, group.key));
 								setGroupExpanded(group.key, !group.expanded);
 							},
 							onCreate: () => {
@@ -3292,10 +3345,15 @@ window.__ModuleLoader__.load({
 							"data-row-key": `overflow:${group.key}`,
 							"aria-expanded": sessionsExpanded,
 							onClick: () => {
-								setSessionLimits((limits) => ({
-									...limits,
-									[group.key]: sessionsExpanded ? COLLAPSED_SESSION_LIMIT : visible.hiddenCount <= COLLAPSED_SESSION_LIMIT ? Infinity : (limits[group.key] ?? COLLAPSED_SESSION_LIMIT) + COLLAPSED_SESSION_LIMIT
+								if (sessionsExpanded) {
+									dropWatermarks((key) => key === group.key);
+									return;
+								}
+								setStoredWatermarks((marks) => ({
+									...marks,
+									[group.key]: visible.hiddenCount <= SESSION_WATERMARK_BASE ? Infinity : watermark + SESSION_WATERMARK_BASE
 								}));
+								setWatermarkMotionKey((key) => key + 1);
 							},
 							children: sessionsExpanded ? t("sessions.collapse") : t("sessions.expand", { n: visible.hiddenCount })
 						})
@@ -3303,7 +3361,7 @@ window.__ModuleLoader__.load({
 				}, group.key);
 			};
 			const groupRows = rootGroups.map((group) => renderGroup(group, 0));
-			return (0, react_jsx_runtime.jsxs)("div", {
+			return (0, react_jsx_runtime.jsxs)(_deepseek_ai_dsh_client_ui_primitives.HoverCardGroup, {
 				className: clsx(WorkspaceBrowser_module_css_default.treeBody, WorkspaceBrowser_module_css_default.wide),
 				children: [
 					workspaceDropAtListStart && (0, react_jsx_runtime.jsx)("span", {
@@ -3315,7 +3373,7 @@ window.__ModuleLoader__.load({
 						label: t("section.sessions"),
 						rowKeys,
 						ready: list.phase === "ready" && workspaceReady && !nativeDragActive,
-						resetKey: JSON.stringify([animationResetKey, sessionLimits]),
+						resetKey: JSON.stringify([animationResetKey, watermarkMotionKey]),
 						children: [groups.length === 0 && (0, react_jsx_runtime.jsx)(EmptySessions, {
 							rowState,
 							onLeaveArchivedOnly,
@@ -3351,7 +3409,7 @@ window.__ModuleLoader__.load({
 				if (nextOrder !== void 0) setSessionOrder(FLAT_SESSION_ORDER_KEY, nextOrder);
 			};
 			const now = Math.floor(Date.now() / 3e4) * 3e4;
-			return (0, react_jsx_runtime.jsxs)("div", {
+			return (0, react_jsx_runtime.jsxs)(_deepseek_ai_dsh_client_ui_primitives.HoverCardGroup, {
 				className: clsx(WorkspaceBrowser_module_css_default.treeBody, WorkspaceBrowser_module_css_default.wide),
 				children: [(0, react_jsx_runtime.jsxs)(AnimatedRows, {
 					className: clsx(WorkspaceBrowser_module_css_default.list, WorkspaceBrowser_module_css_default.flatList),
@@ -3484,7 +3542,7 @@ window.__ModuleLoader__.load({
 		* @param props - composed slot props (shell owner share + store + injected actions).
 		* @returns the region element tree.
 		*/
-		function WorkspaceBrowser({ wide, usePanelInfo, expandSidebar, useSessions, useSessionStatus, useWorkspaces, useStore, actions, startSession, open, requestSessionRename, notifyArchivedNotOpenable, renameWorkspace, deleteWorkspace, insertWorkspaceBefore, unarchiveSession, createWorkspace, searchSessions, searchResultLimit, useDirectoryFlow, useHostInfo, useShortcuts, useWorkspaceShortcuts, requestSearch, requestAddWorkspace, closeAddWorkspace, setDirectoryBusy, dismissForkError, renderSlot, t }) {
+		function WorkspaceBrowser({ wide, usePanelInfo, expandSidebar, useSessions, useSessionStatus, useWorkspaces, useStore, actions, startSession, open, requestSessionRename, notifyArchivedNotOpenable, renameWorkspace, deleteWorkspace, insertWorkspaceBefore, unarchiveSession, createWorkspace, searchSessions, searchResultLimit, useDirectoryFlow, useHostInfo, useShortcuts, useWorkspaceShortcuts, requestSearch, requestAddWorkspace, closeAddWorkspace, setDirectoryBusy, renderSlot, t }) {
 			const home = useHostInfo((info) => info.home);
 			const shortcuts = useShortcuts((rows) => rows);
 			const searchShortcut = shortcuts.find((row) => row.id === "session.search");
@@ -4092,11 +4150,7 @@ window.__ModuleLoader__.load({
 							role: "alert",
 							children: deleteError
 						})]
-					}),
-					shortcutState.forkError !== null && (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Toast, {
-						text: t(shortcutState.forkError.reason === "unavailable" ? "shortcut.noCompletedTurn" : "shortcut.forkFailed"),
-						onDone: dismissForkError
-					}, shortcutState.forkError.seq)
+					})
 				]
 			});
 		}
@@ -4141,6 +4195,7 @@ window.__ModuleLoader__.load({
 				side: "bottom",
 				align: "end",
 				delayMs: 500,
+				portal: true,
 				children: (0, react_jsx_runtime.jsx)("button", {
 					type: "button",
 					className: Rows_module_css_default.iconButton,
@@ -4286,14 +4341,17 @@ window.__ModuleLoader__.load({
 		/** The fork action: one `sidebar.workspaces.session.menu.item` row. */
 		/**
 		* Menu row (order 300): fork at the Session's last completed turn; the child
-		* arrives through the Host list beside its source.
-		* @param props - owner share, menu open state, and the fork share.
-		* @returns the row.
+		* arrives through the Host list beside its source. Absent when the access
+		* snapshot excludes `session/fork` for this Session.
+		* @param props - owner share, menu open state, access Hook, and the fork share.
+		* @returns the row, or nothing when the caller may not fork this Session.
 		*/
-		function ForkSessionMenuItem({ sessionId, useMenuOpenState, useShortcuts, forkSession, t }) {
+		function ForkSessionMenuItem({ sessionId, useMenuOpenState, useShortcuts, useSessionAccess, forkSession, t }) {
 			const [, setMenuOpen] = useMenuOpenState();
+			const shortcut = useShortcuts((rows) => rows.find((row) => row.id === "session.fork"));
+			if (!useSessionAccess(sessionId, "session/fork")) return null;
 			return (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.MenuItemButton, {
-				shortcut: useShortcuts((rows) => rows.find((row) => row.id === "session.fork")),
+				shortcut,
 				icon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconBranchOutlineRegular, {}),
 				onSelect: () => {
 					setMenuOpen(false);
@@ -4352,6 +4410,7 @@ window.__ModuleLoader__.load({
 				side: "bottom",
 				align: "end",
 				delayMs: 500,
+				portal: true,
 				children: (0, react_jsx_runtime.jsx)("button", {
 					type: "button",
 					className: Rows_module_css_default.iconButton,
@@ -4482,81 +4541,238 @@ window.__ModuleLoader__.load({
 		//#endregion
 		//#region lib/types/client/session-actions/RowActionToast.js
 		/**
-		* The `shell.overlay` entry for Workspace and Session notices.
-		* One notice is visible at a time; a parent rerender does not extend its hold.
+		* Dispatch the current notice without interpreting its business payload.
+		* @param props - Current notice, dismissal, and the declared keyed renderer.
+		* @returns The selected notice presentation, or nothing.
 		*/
-		/**
-		* Hold for the notices that take longer to read than a one-line warning: the
-		* archive and fork recovery actions, and a refused Session creation quoting the Host's reason.
-		*/
-		const LONG_TOAST_HOLD_MS = 6e3;
-		/**
-		* Render an operation notice, retaining recovery actions for six seconds.
-		* @param props - notice and viewing sources, dismissal and recovery callbacks, and localized copy.
-		* @returns the notice on display, or null.
-		*/
-		function RowActionToast({ useToast, useStore, dismissToast, undoArchive, showArchived, openForkSource, t }) {
-			const toast = useToast((current) => current);
-			const archivedRowsVisible = useStore((state) => (state.archivedFilter ?? "default") !== "default");
-			if (toast === null) return null;
-			if (toast.kind === "forkRequiresOpen") return (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Toast, {
-				text: t("toast.forkRequiresOpen"),
-				icon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconWarningOutlineRegular, {}),
-				holdMs: LONG_TOAST_HOLD_MS,
-				actions: [{
-					label: t("toast.openForkSource"),
-					onClick: () => {
-						dismissToast();
-						openForkSource(toast.sessionId);
-					}
-				}],
-				onDone: dismissToast
-			}, `toast-${String(toast.seq)}`);
-			if (toast.kind === "archived" || toast.kind === "stoppedAndArchived") {
-				const { sessionId } = toast;
-				return (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Toast, {
-					text: t(toast.kind === "archived" ? "toast.archived" : "toast.stoppedAndArchived"),
-					tone: "success",
-					holdMs: LONG_TOAST_HOLD_MS,
-					actions: [{
-						label: t("toast.archivedUndo"),
-						onClick: () => {
-							dismissToast();
-							undoArchive(sessionId);
-						}
-					}, ...archivedRowsVisible ? [] : [{
-						prefix: t("toast.archivedOr"),
-						label: t("toast.archivedFilter"),
-						onClick: () => {
-							dismissToast();
-							showArchived();
-						}
-					}]],
-					onDone: dismissToast
-				}, `toast-${String(toast.seq)}`);
-			}
-			if (toast.kind === "createFailed") return (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Toast, {
-				text: t("toast.createFailed", { message: toast.message }),
-				icon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconWarningOutlineRegular, {}),
-				holdMs: LONG_TOAST_HOLD_MS,
-				onDone: dismissToast
-			}, `toast-${String(toast.seq)}`);
-			return (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Toast, {
-				text: plainNoticeText(toast, t),
-				icon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconWarningOutlineRegular, {}),
-				onDone: dismissToast
-			}, `toast-${String(toast.seq)}`);
+		function RowActionToast({ useToast, dismissToast, renderSlot }) {
+			const notice = useToast((current) => current);
+			if (notice === null) return null;
+			return renderSlot("workspace.toast", {
+				...notice,
+				dismissToast
+			}, { entryKey: notice.kind });
 		}
-		/** The copy of one plain warning, keyed by the notice kind the union closes over. */
-		function plainNoticeText(toast, t) {
-			switch (toast.kind) {
-				case "pinFailed": return t("toast.pinFailed");
-				case "unpinFailed": return t("toast.unpinFailed");
-				case "defaultWorkspaceFailed": return t("defaultWorkspace.failed");
-				case "archivedNotOpenable": return t("toast.archivedNotOpenable");
-				/* v8 ignore next 2 -- closed-union backstop; only reached if a notice kind is forged */
-				default: return assertNever$1(toast);
-			}
+		//#endregion
+		//#region lib/types/client/toast/Toast.js
+		/** One presentation Factory and the adapters for keyed Workspace notices. */
+		/**
+		* Render one notice using the shared Factory.
+		* @param props - Keyed payload, injected display mapping, locale, and Factory renderer.
+		* @returns The shared Toast occurrence.
+		*/
+		function ToastEntry(props) {
+			const { dismissToast, display, t, renderFactorySlot, seq } = props;
+			return renderFactorySlot("workspace.toast.content", {
+				...display(props, t, dismissToast),
+				seq,
+				onDone: dismissToast
+			});
+		}
+		/**
+		* Keep the archive filter action reactive without subscribing unrelated notices.
+		* @param props - Archive notice, display mapping, and the existing viewing store.
+		* @returns The shared Toast occurrence with its current actions.
+		*/
+		function ArchiveToastEntry(props) {
+			const { dismissToast, display, filterAction, useStore, t, renderFactorySlot, seq } = props;
+			const archivedVisible = useStore((state) => (state.archivedFilter ?? "default") !== "default");
+			const fields = display(props, t, dismissToast);
+			return renderFactorySlot("workspace.toast.content", {
+				...fields,
+				actions: [...fields.actions ?? [], ...archivedVisible ? [] : [filterAction(t, dismissToast)]],
+				seq,
+				onDone: dismissToast
+			});
+		}
+		/**
+		* Present plain display data with the shared primitive's timing and portal.
+		* @param props - Localized display fields, display identity, and dismissal.
+		* @returns One Toast, remounted only for a new display identity.
+		*/
+		function WorkspaceToast({ seq, text, tone, holdMs, actions, onDone }) {
+			return (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Toast, {
+				text,
+				onDone,
+				...tone === "success" ? { tone: "success" } : {},
+				...tone === "warning" ? { icon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconWarningOutlineRegular, {}) } : {},
+				...holdMs === void 0 ? {} : { holdMs },
+				...actions === void 0 ? {} : { actions }
+			}, seq);
+		}
+		//#endregion
+		//#region lib/types/client/toast/register.js
+		/** Register notice presentations with their business-owned display fields and actions.
+		* @param ctx - Workspace plugin context.
+		* @param viewStore - Viewing store, read only by archive notices.
+		* @param actions - Archive and source-opening callbacks.
+		*/
+		function registerToasts(ctx, viewStore, actions) {
+			const archiveFilterAction = (t, dismiss) => ({
+				prefix: t("toast.archivedOr"),
+				label: t("toast.archivedFilter"),
+				onClick: () => {
+					dismiss();
+					actions.showArchived();
+				}
+			});
+			ctx.slots.registerFactory({
+				name: "workspace.toast.content",
+				scope: "root"
+			}, WorkspaceToast);
+			ctx.slots.inject("workspace.toast", function* () {
+				yield ctx.slots.register({
+					name: "workspace.toast",
+					key: "sessionIdCopied",
+					locale: "workspace",
+					inject: () => ({ display: (_notice, t) => ({
+						text: t("toast.sessionIdCopied"),
+						tone: "success"
+					}) })
+				}, ToastEntry);
+				yield ctx.slots.register({
+					name: "workspace.toast",
+					key: "sessionIdCopyFailed",
+					locale: "workspace",
+					inject: () => ({ display: (_notice, t) => ({
+						text: t("toast.sessionIdCopyFailed"),
+						tone: "warning"
+					}) })
+				}, ToastEntry);
+				yield ctx.slots.register({
+					name: "workspace.toast",
+					key: "pinFailed",
+					locale: "workspace",
+					inject: () => ({ display: (_notice, t) => ({
+						text: t("toast.pinFailed"),
+						tone: "warning"
+					}) })
+				}, ToastEntry);
+				yield ctx.slots.register({
+					name: "workspace.toast",
+					key: "unpinFailed",
+					locale: "workspace",
+					inject: () => ({ display: (_notice, t) => ({
+						text: t("toast.unpinFailed"),
+						tone: "warning"
+					}) })
+				}, ToastEntry);
+				yield ctx.slots.register({
+					name: "workspace.toast",
+					key: "archivedNotOpenable",
+					locale: "workspace",
+					inject: () => ({ display: (_notice, t) => ({
+						text: t("toast.archivedNotOpenable"),
+						tone: "warning"
+					}) })
+				}, ToastEntry);
+				yield ctx.slots.register({
+					name: "workspace.toast",
+					key: "defaultWorkspaceFailed",
+					locale: "workspace",
+					inject: () => ({ display: (_notice, t) => ({
+						text: t("defaultWorkspace.failed"),
+						tone: "warning"
+					}) })
+				}, ToastEntry);
+				yield ctx.slots.register({
+					name: "workspace.toast",
+					key: "shortcutForkFailed",
+					locale: "workspace",
+					inject: () => ({ display: (notice, t) => ({
+						text: t(notice.reason === "unavailable" ? "shortcut.noCompletedTurn" : "shortcut.forkFailed"),
+						tone: "plain"
+					}) })
+				}, ToastEntry);
+				yield ctx.slots.register({
+					name: "workspace.toast",
+					key: "createFailed",
+					locale: "workspace",
+					inject: () => ({ display: (notice, t) => ({
+						text: t("toast.createFailed", { message: notice.message }),
+						tone: "warning",
+						holdMs: 6e3
+					}) })
+				}, ToastEntry);
+				yield ctx.slots.register({
+					name: "workspace.toast",
+					key: "forkRequiresOpen",
+					locale: "workspace",
+					inject: () => ({ display: (notice, t, dismiss) => ({
+						text: t("toast.forkRequiresOpen"),
+						tone: "warning",
+						holdMs: 6e3,
+						actions: [{
+							label: t("toast.openForkSource"),
+							onClick: () => {
+								dismiss();
+								actions.openForkSource(notice.sessionId);
+							}
+						}]
+					}) })
+				}, ToastEntry);
+				yield ctx.slots.register({
+					name: "workspace.toast",
+					key: "archived",
+					locale: "workspace",
+					store: viewStore,
+					inject: () => ({
+						display: (notice, t, dismiss) => ({
+							text: t("toast.archived"),
+							tone: "success",
+							holdMs: 6e3,
+							actions: [{
+								label: t("toast.archivedUndo"),
+								onClick: () => {
+									dismiss();
+									actions.undoArchive(notice.sessionId);
+								}
+							}]
+						}),
+						filterAction: archiveFilterAction
+					})
+				}, ArchiveToastEntry);
+				yield ctx.slots.register({
+					name: "workspace.toast",
+					key: "stoppedAndArchived",
+					locale: "workspace",
+					store: viewStore,
+					inject: () => ({
+						display: (notice, t, dismiss) => ({
+							text: t("toast.stoppedAndArchived"),
+							tone: "success",
+							holdMs: 6e3,
+							actions: [{
+								label: t("toast.archivedUndo"),
+								onClick: () => {
+									dismiss();
+									actions.undoArchive(notice.sessionId);
+								}
+							}]
+						}),
+						filterAction: archiveFilterAction
+					})
+				}, ArchiveToastEntry);
+			});
+		}
+		//#endregion
+		//#region lib/types/client/session-actions/SessionId.js
+		/** Copy the row's Session ID without opening its history. */
+		/**
+		* Copy the complete ID after dismissing the row menu.
+		* @param props - Row identity, menu dismissal, clipboard action, and locale.
+		* @returns The final built-in menu item.
+		*/
+		function SessionIdMenuItem({ sessionId, useMenuOpenState, copySessionId, t }) {
+			const [, setMenuOpen] = useMenuOpenState();
+			return (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.MenuItemButton, {
+				icon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCopyOutlineRegular, {}),
+				onSelect: () => {
+					setMenuOpen(false);
+					copySessionId(sessionId);
+				},
+				children: t("menu.sessionId")
+			});
 		}
 		//#endregion
 		//#region lib/types/client/locales.js
@@ -4624,6 +4840,9 @@ window.__ModuleLoader__.load({
 			"menu.unarchiveSession": "取消归档",
 			"menu.pinSession": "置顶会话",
 			"menu.unpinSession": "取消置顶",
+			"menu.sessionId": "复制 Session ID",
+			"toast.sessionIdCopied": "Session ID 已复制",
+			"toast.sessionIdCopyFailed": "复制失败，请重试",
 			"row.archived": "已归档",
 			"row.pinned": "已置顶",
 			"toast.archivedNotOpenable": "已归档对话暂时无法查看，请取消归档后查看",
@@ -4743,6 +4962,9 @@ window.__ModuleLoader__.load({
 			"menu.unarchiveSession": "Unarchive session",
 			"menu.pinSession": "Pin session",
 			"menu.unpinSession": "Unpin session",
+			"menu.sessionId": "Copy Session ID",
+			"toast.sessionIdCopied": "Session ID copied",
+			"toast.sessionIdCopyFailed": "Copy failed. Try again.",
 			"row.archived": "Archived",
 			"row.pinned": "Pinned",
 			"toast.archivedNotOpenable": "Archived sessions cannot be opened. Unarchive it to view.",
@@ -4823,7 +5045,8 @@ window.__ModuleLoader__.load({
 			"remote",
 			"remote.directoryPicker",
 			"layout",
-			"shortcuts"
+			"shortcuts",
+			"remoteAccess"
 		];
 		/**
 		* Register the browser and picker once their slot declarations are on the
@@ -4849,7 +5072,10 @@ window.__ModuleLoader__.load({
 				});
 			};
 			const uiWorkspace = new UiWorkspaceService(ctx, ctx.remote.directoryPicker, workspaces, sessions, viewInstance.actions, notify);
-			ctx.slots.provideRoot({ hooks: { workspaces: workspaces.list } });
+			ctx.slots.provideRoot({
+				hooks: { workspaces: workspaces.list },
+				keyedHooks: { workspaceAccess: (workspaceId, action) => action === void 0 ? void 0 : ctx.remoteAccess.source("workspace", workspaceId, action) }
+			});
 			ctx.effect(() => ctx.locale.register(NS, {
 				zh,
 				en
@@ -4927,7 +5153,12 @@ window.__ModuleLoader__.load({
 				},
 				unarchiveSession
 			});
-			installWorkspaceShortcuts(ctx, uiWorkspace, shortcutControls, archiveInjected().archiveSession);
+			installWorkspaceShortcuts(ctx, uiWorkspace, shortcutControls, archiveInjected().archiveSession, (reason) => {
+				notify({
+					kind: "shortcutForkFailed",
+					reason
+				});
+			});
 			const archiveConfirmInjected = () => ({
 				hooks: { archiveRequest },
 				settleSessionArchive: () => {
@@ -4955,17 +5186,16 @@ window.__ModuleLoader__.load({
 					});
 				});
 			} });
+			const sessionIdInjected = () => ({ copySessionId: async (sessionId) => {
+				notify({ kind: await (0, _deepseek_ai_dsh_client_ui_primitives.writeClipboard)(sessionId) ? "sessionIdCopied" : "sessionIdCopyFailed" });
+			} });
 			const renameInjected = () => ({ requestSessionRename });
 			const renameDialogInjected = () => ({
 				hooks: { renameRequest },
 				settleSessionRename: shortcutControls.closeRename,
 				renameSession
 			});
-			const rowToastInjected = () => ({
-				hooks: { toast: rowToast },
-				dismissToast: () => {
-					rowToast.set(null);
-				},
+			registerToasts(ctx, viewStore, {
 				undoArchive: unarchiveSession,
 				showArchived: () => {
 					viewInstance.actions.setArchivedFilter("show");
@@ -4976,6 +5206,12 @@ window.__ModuleLoader__.load({
 						return;
 					}
 					openSession(sessionId);
+				}
+			});
+			const rowToastInjected = () => ({
+				hooks: { toast: rowToast },
+				dismissToast: () => {
+					rowToast.set(null);
 				}
 			});
 			const browserInjected = () => ({
@@ -5006,7 +5242,6 @@ window.__ModuleLoader__.load({
 				requestAddWorkspace: shortcutControls.add,
 				closeAddWorkspace: shortcutControls.closeAdd,
 				setDirectoryBusy: shortcutControls.directoryBusy,
-				dismissForkError: shortcutControls.dismissForkError,
 				hooks: {
 					directoryFlow: browserFlowSource,
 					hostInfo,
@@ -5099,6 +5334,13 @@ ctx.slots.inject("sidebar.workspaces.session.menu.item", function* () {
 					locale: NS,
 					inject: archiveInjected
 				}, ArchiveSessionMenuItem);
+				yield ctx.slots.register({
+					name: "sidebar.workspaces.session.menu.item",
+					id: "session-id",
+					order: 450,
+					locale: NS,
+					inject: sessionIdInjected
+				}, SessionIdMenuItem);
 			});
 			ctx.slots.inject("sidebar.workspaces.session.row.action", function* () {
 				yield ctx.slots.register({
@@ -5132,9 +5374,11 @@ ctx.slots.inject("sidebar.workspaces.session.menu.item", function* () {
 				yield ctx.slots.register({
 					name: "shell.overlay",
 					id: "workspace.row-toast",
-					locale: NS,
-					store: viewStore,
-					inject: rowToastInjected
+					inject: rowToastInjected,
+					children: { "workspace.toast": {
+						kind: "keyed",
+						scope: "root"
+					} }
 				}, RowActionToast);
 			});
 			ctx.slots.inject("conversation.hero.workspace", () => ctx.slots.register({

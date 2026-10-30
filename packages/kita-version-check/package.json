@@ -1,31 +1,35 @@
 {
   "name": "kita-version-check",
   "version": "1.0.0",
-  "description": "DSH version/update check in the left sidebar: a sidebar-foot entry comparing the running deployment version against the npm registry dist-tags, with a detail panel.",
-  "private": true,
+  "description": "DSH version/update check in the left sidebar: a sidebar panel entry comparing the running deployment version against the npm registry dist-tags, with a detail page.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "inject": [],
       "platform": "web"
     }
   },
   "files": [
-    "lib",
+    "lib/*.js",
+    "cordis.patch.yml",
     "scripts",
     "README.md",
     "LICENSE"
   ],
   "dependencies": {},
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/schemastery": "*"
+    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/schemastery": "~3.18.5"
   },
   "license": "MIT"
 }

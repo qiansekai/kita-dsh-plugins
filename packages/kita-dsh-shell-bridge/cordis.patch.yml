@@ -1,0 +1,8 @@
+# kita-dsh-shell-bridge bundle patch: one host+client row, no official row to replace.
+# The route (/kita-shell/state) is host-side; the poller is the client half.
+- insert:
+    - id: kita-dsh-shell-bridge
+      name: 'kita-dsh-shell-bridge'
+      config:
+        titleMaxBytes: 120
+        includeIdle: false

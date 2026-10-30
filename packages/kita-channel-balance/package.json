@@ -2,29 +2,33 @@
   "name": "kita-channel-balance",
   "version": "1.0.0",
   "description": "Live channel balance in the composer tool row: official DeepSeek /user/balance plus auto-probed relay billing endpoints (new-api, one-api, Moonshot, credit_grants), aggregated by a host half and rendered next to the model selector.",
-  "private": true,
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "inject": [],
       "platform": "web"
     }
   },
   "files": [
-    "lib",
+    "lib/*.js",
+    "cordis.patch.yml",
     "README.md",
     "LICENSE"
   ],
   "dependencies": {},
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/schemastery": "*"
+    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/schemastery": "~3.18.5"
   },
   "license": "MIT"
 }

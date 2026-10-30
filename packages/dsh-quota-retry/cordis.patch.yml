@@ -1,0 +1,15 @@
+# dsh-quota-retry bundle patch: one host-only row that keeps a run suspended on
+# balance/quota failures and retries bounded on auth failures.
+- insert:
+    - id: dsh-quota-retry
+      name: '@dsh-external/dsh-quota-retry'
+      config:
+        retryCodes: ['QUOTA']
+        boundedRetryCodes: ['AUTH']
+        initialDelayMs: 60000
+        maxDelayMs: 1800000
+        jitterRatio: 0.2
+        maxRetries: 0
+        boundedInitialDelayMs: 10000
+        boundedMaxDelayMs: 120000
+        boundedMaxRetries: 5

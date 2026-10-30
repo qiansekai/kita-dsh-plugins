@@ -15,31 +15,55 @@ dsh 看到的是本地客户端（loopback 围栏通过、本地专属功能可�
 **本机管理面**（配对码 / 二维码 / `/admin`）另需一道本机管理令牌，见「本机管理面为什么需要令牌」。
 **不防护**：本机已运行的进程（它们能读 token 文件与令牌文件）。
 
-## 装配
+## 安装
 
-依赖 `@deepseek-ai/cordis`、`@deepseek-ai/schemastery`。profile `cordis.patch.yml` 插入：
+本包按 DSH 0.2.1-rc.2 的 bundle 形态声明：`dsh.bundle.patch` 指向自带的 `cordis.patch.yml`，
+装进 profile 后由 `dsh.profile.bundles` 自动带起，**不需要手改 profile 的 `cordis.patch.yml`**。
 
-```yaml
-- insert:
-    - id: kita-dsh-gateway
-      name: kita-dsh-gateway
-      config:
-        port: 3081                    # LAN 入口端口
-        targetPort: 3080              # dsh loopback 端口
-        codeMinutes: 10               # 配对码有效期（分钟）
-        cloudflaredPath: ''           # 空 = 依次查 CLOUDFLARED_PATH、PATH
-        tunnelRestartLimit: 5         # 隧道进程意外退出后的自动重启上限
-        tunnelProtocol: http2         # 隧道传输：auto | http2 | quic（默认 http2，见下）
-        adminToken: ''                # 可选：钉死本机管理令牌（默认自动生成并存盘）
-        tunnelStartTimeoutMs: 25000   # tunnel-start 等待公网地址的上限
-        tunnelEdgeIpVersion: '4'    # 快速隧道 Edge IP 族：auto | 4 | 6（国内建议 4）
-        tunnelRetries: 10            # 连接/协议错误重试次数；0 = cloudflared 默认 5
-        tunnelRegion: ''             # Cloudflare Edge 区域；空 = 全球
+```powershell
+dsh plugin --profile web add link:<仓库绝对路径>/packages/kita-dsh-gateway
 ```
 
-`cloudflaredPath` 是**部署值**（本机路径写配置，不写进代码）：本机 cloudflared 不在 PATH，
-故在生产 profile 的 patch 里显式给出。未配置且探测不到时，隧道卡片会显示明确的提示，
-其余功能不受影响。
+然后把 `kita-dsh-gateway` 加进 `<DSH_HOME>/profiles/web/package.json` 的 `dsh.profile.bundles`；
+或者用仓库根的一键安装器（它把这两步都做了，并自动探测 home/profile）：
+
+```powershell
+node scripts/install.mjs --only kita-dsh-gateway
+```
+
+装完必须**重启 dsh web**（host 半与新增 client entry 只在启动时装配）。
+
+## 配置
+
+自带 patch 只写通用默认值（`port: 3081`、`targetPort: 3080`、`codeMinutes: 10`），
+其余配置项按需在 profile 的 `cordis.patch.yml` 里覆盖，或直接改本包 patch：
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `port` | `3081` | LAN 入口端口 |
+| `targetPort` | `3080` | 反代目标（dsh loopback 端口） |
+| `codeMinutes` | `10` | 配对码有效期（分钟） |
+| `cloudflaredPath` | `''` | 空 = 依次查 `CLOUDFLARED_PATH`、`PATH` |
+| `tunnelRestartLimit` | `5` | 隧道进程意外退出后的自动重启上限 |
+| `tunnelProtocol` | `http2` | 隧道传输：`auto` / `http2` / `quic` |
+| `adminToken` | `''` | 可选：钉死本机管理令牌（默认自动生成并存盘） |
+| `tunnelStartTimeoutMs` | `25000` | 等待公网地址的上限 |
+| `tunnelEdgeIpVersion` | `'4'` | Edge IP 族：`auto` / `4` / `6`（国内建议 4） |
+| `tunnelRetries` | `10` | 连接/协议错误重试；`0` = cloudflared 默认 5 |
+| `tunnelRegion` | `''` | Cloudflare Edge 区域；空 = 全球 |
+| `apkDir` | `''` | 手机壳 APK 分发目录（需含 `version.json`）；空 = 关闭 `/apk/*` 路由 |
+
+`port` / `targetPort` 还可以由实例级环境变量 `DSH_GATEWAY_PORT` / `DSH_GATEWAY_TARGET_PORT`
+覆盖（env 优先于配置）—— 同一台机器上起第二个 dsh 实例时靠它避让端口。
+`cloudflaredPath` 与 `apkDir` 都是部署值，代码里不写死任何机器路径。
+前者未配置且探测不到时隧道卡片会显示明确提示，后者为空时 `/apk/*` 路由不存在，其余功能都不受影响。
+
+### APK 分发（可选）
+
+手机壳（dsh-mobile-shell）可以让网关host一个升级通道：`apkDir` 下放 `version.json`
+（`versionCode` / `versionName` / `sha256` / `size` / `file`）和它指向的 APK。手机先读
+`/apk/version` 拿清单，再下载清单里点名的那个文件 —— 请求不允许指定清单之外的文件名，
+所以即使任何已配对设备都能访问，也走不出目录。未配置时该路由整体不存在。
 
 ## 扫码即配对
 

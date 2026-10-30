@@ -30,21 +30,31 @@ llm-retry 之后，只接手它放行的失败）：
 `[dsh-quota-retry] provider "..." 余额/额度不足（QUOTA: ...）——第 N 次重试将于 Xs 后开始`
 `[dsh-quota-retry] provider "..." 凭据/鉴权失败（AUTH: ...）——第 N 次重试将于 Xs 后开始（最多 5 次）`
 
-## 安装
+## 装法与版本要求
 
-注入器环境内（免重启，重启后由注入器 registry 自动恢复）：
+要求 DSH `0.2.1-rc.2`（`@deepseek-ai/dsh`）。本包是**纯 host** 插件、零运行时 import，
+不需要任何依赖包；`@deepseek-ai/cordis` 只作为 peerDependency 声明（宿主提供 `~4.0.5`）。
+
+官方 bundle 装配（推荐）：包内自带 `cordis.patch.yml`，insert 行的 `id` 是 `dsh-quota-retry`、
+`name` 是包名 `@dsh-external/dsh-quota-retry`：
+
+```
+dsh plugin --profile web add <本仓库路径>/packages/dsh-quota-retry
+```
+
+再把包名 `@dsh-external/dsh-quota-retry` 加进该 profile `package.json` 的
+`dsh.profile.bundles` 数组（profile 会装配本包的 patch）。本仓库根
+`node scripts/install.mjs --only dsh-quota-retry` 会把这两步一起做完。
+**host 半改动必须重启 dsh web 才生效。**
+
+开发期也可以用注入器（免重启，重启后由注入器 registry 自动恢复）：
 
 ```
 dev_inject_plugin <本包路径>
 ```
 
-或官方装配（重启后由 bundles 接管）：
-
-```
-dsh plugin --profile web add <本包路径>
-```
-
-卸载：`dev_uninject_plugin dsh-quota-retry`
+卸载：bundle 装配用 `dsh plugin --profile web remove @dsh-external/dsh-quota-retry`，
+注入器装配用 `dev_uninject_plugin dsh-quota-retry`。
 
 ## 配置（可选）
 
@@ -77,3 +87,16 @@ dsh plugin --profile web add <本包路径>
 注入后可用注入器 staging 区做端到端探针（构造假 session、真实 scope carrier 直接
 dispatch `agent/request-error`）：QUOTA 无界排程/等待后返回 `{kind:'retry'}`、
 AUTH 有界排程且第 6 次失败透传（次数上限生效）、未匹配错误码透传。
+
+## 已知限制
+
+- **只接管 `agent/request-error` 恢复点**：官方 `dsh-llm-retry` 已接手的错误码
+  （`RATE_LIMIT` / `TIMEOUT` / `TRANSPORT` 等）不会流到本包，本包不改它们的退避策略。
+- **`QUOTA` 无界模式默认不主动放弃**：上游一直不充值，本轮就一直挂起（设计意图）。
+  需要上限就配 `maxRetries > 0`；等待期间中断生成或卸载插件都会取消等待，不留孤儿计时器。
+- **重试计数从持久 session 事件推导**：只有同 turn/step/provider/策略键才累计；换 provider
+  或改策略参数（模式、错误码、延迟、抖动、上限都算策略键）会从 1 重新计数。
+- **供应商 `providerRetryAfterMs` 优先**于本地退避，但会被封顶到该模式的 `maxDelayMs`。
+- **配置校验是手写的**（本包刻意不引 schemastery）：键名拼错或参数越界走「配置无效、插件已跳过」
+  的降级分支并打日志，不会让 profile 装配失败；代价是错误只在日志里可见，UI 不会提示。
+- 不处理流式中途失败（只在恢复点生效），也不做跨进程重试记录（计数只在本轮运行的 session 里）。

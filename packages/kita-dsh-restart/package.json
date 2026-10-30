@@ -1,30 +1,35 @@
 {
   "name": "kita-dsh-restart",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "One-click dsh web restart from the browser GUI: a sidebar-foot button backed by an on-demand scheduled task, so the restart survives the process that requested it.",
-  "private": true,
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "inject": [],
       "platform": "web"
     }
   },
   "files": [
-    "lib",
+    "lib/*.js",
     "scripts",
-    "README.md"
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
   ],
   "dependencies": {},
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/schemastery": "*"
+    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/schemastery": "~3.18.5"
   },
   "license": "MIT"
 }
