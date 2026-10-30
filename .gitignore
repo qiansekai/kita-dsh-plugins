@@ -2,5 +2,10 @@ node_modules/
 *.log
 .DS_Store
 
-# backups written by Archive/dsh-envs/patches/rebase-kita-workspace-ui.py
-*.bak-prerebase-*
+# local backups (plugin patches, profile manifests, rebase tooling)
+*.bak
+*.bak-*
+
+# pnpm / npm caches and packed tarballs
+.pnpm-store/
+*.tgz

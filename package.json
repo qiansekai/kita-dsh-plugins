@@ -1,0 +1,17 @@
+{
+  "name": "kita-dsh-plugins",
+  "version": "0.0.0",
+  "private": true,
+  "description": "DeepSeek Harness plugin collection: bundle-shaped, installable into any DSH profile",
+  "type": "module",
+  "scripts": {
+    "check": "node scripts/check-packages.mjs",
+    "list": "node scripts/install.mjs --list",
+    "install-plugins": "node scripts/install.mjs",
+    "uninstall-plugins": "node scripts/install.mjs --uninstall"
+  },
+  "devDependencies": {
+    "js-yaml": "^4.3.2"
+  },
+  "license": "MIT"
+}
