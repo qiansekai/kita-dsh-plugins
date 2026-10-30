@@ -75,10 +75,10 @@ function resolveHome(options) {
 }
 
 /** Run a command and stream its output. Returns the exit code. */
-function run(command, args, cwd, dryRun) {
+function run(command, args, cwd, dryRun, extraEnv) {
   const printable = [command, ...args].map((part) => (part.includes(' ') ? JSON.stringify(part) : part)).join(' ')
   if (dryRun) { console.log(`  [dry-run] (cwd ${cwd}) ${printable}`); return 0 }
-  const result = spawnSync(command, args, { cwd, stdio: 'inherit', shell: process.platform === 'win32' })
+  const result = spawnSync(command, args, { cwd, stdio: 'inherit', shell: process.platform === 'win32', env: extraEnv ? { ...process.env, ...extraEnv } : process.env })
   if (result.error) { console.error(`  command failed to start: ${result.error.message}`); return 1 }
   return result.status ?? 1
 }
@@ -89,14 +89,28 @@ function hasCommand(command) {
 }
 
 /** The command that adds/removes a dependency inside a profile. */
-function packageManager(profileDir) {
-  const usingCli = hasCommand('dsh')
-  if (usingCli) return { add: (spec) => ['dsh', ['plugin', '--profile', profileName, 'add', spec]], remove: (spec) => ['dsh', ['plugin', '--profile', profileName, 'remove', spec]], kind: 'dsh plugin' }
-  if (hasCommand('pnpm')) {
+function packageManager(profileDir, home) {
+  if (hasCommand('dsh')) {
+    // "dsh plugin" resolves the profile from the environment, so inheriting a
+    // different DSH_HOME would install into the wrong deployment - often the one
+    // that is already running. Pin the child's home explicitly.
     return {
-      add: (spec) => ['pnpm', ['add', '-w', '--config.ignore-workspace-root-check=true', spec]],
-      remove: (spec) => ['pnpm', ['remove', '-w', '--config.ignore-workspace-root-check=true', spec]],
-      kind: 'pnpm (in profile directory)',
+      add: (spec) => ['dsh', ['plugin', '--profile', profileName, 'add', spec]],
+      remove: (spec) => ['dsh', ['plugin', '--profile', profileName, 'remove', spec]],
+      kind: 'dsh plugin',
+      env: { DSH_HOME: home },
+    }
+  }
+  if (hasCommand('pnpm')) {
+    // "-w" is only legal inside a pnpm workspace; a freshly created profile may
+    // not have pnpm-workspace.yaml yet, and pnpm 10 then hard-fails with
+    // "--workspace-root may only be used inside a workspace".
+    const isWorkspace = existsSync(join(profileDir, 'pnpm-workspace.yaml')) || existsSync(join(profileDir, 'pnpm-workspace.yml'))
+    const flags = isWorkspace ? ['-w', '--config.ignore-workspace-root-check=true'] : ['--config.ignore-workspace-root-check=true']
+    return {
+      add: (spec) => ['pnpm', ['add', ...flags, spec]],
+      remove: (spec) => ['pnpm', ['remove', ...flags, spec]],
+      kind: isWorkspace ? 'pnpm (workspace root)' : 'pnpm',
     }
   }
   return null
@@ -151,7 +165,7 @@ function main() {
     console.error('  start dsh once (it creates the profile), or pass --home <DSH_HOME> / --profile <name>.')
     process.exit(1)
   }
-  const manager = packageManager(profileDir)
+  const manager = packageManager(profileDir, home)
   if (!manager) { console.error('neither "dsh" nor "pnpm" is on PATH; install pnpm first (npm i -g pnpm).'); process.exit(1) }
 
   console.log(`DSH home : ${home}`)
@@ -168,6 +182,7 @@ function main() {
   manifest.dependencies ??= {}
 
   let failures = 0
+  let changed = false
   for (const item of selected) {
     if (!item.hasBundle && !options.force) {
       console.log(`skip  ${item.name}: no dsh.bundle.patch (pass --force to install anyway)`)
@@ -176,22 +191,27 @@ function main() {
     const linkSpec = `link:${item.cwd}`
     if (options.uninstall) {
       const [command, args] = manager.remove(item.name)
-      if (run(command, args, profileDir, options.dryRun) !== 0) { failures += 1; console.error(`  remove failed for ${item.name}`); continue }
+      if (run(command, args, profileDir, options.dryRun, manager.env) !== 0) { failures += 1; console.error(`  remove failed for ${item.name}`); continue }
       delete manifest.dependencies[item.name]
       const index = bundles.indexOf(item.name)
       if (index >= 0) bundles.splice(index, 1)
+      changed = true
       console.log(options.dryRun ? `would remove ${item.name}` : `removed ${item.name}`)
       continue
     }
     const [command, args] = manager.add(linkSpec)
-    if (run(command, args, profileDir, options.dryRun) !== 0) { failures += 1; console.error(`  install failed for ${item.name}`); continue }
+    if (run(command, args, profileDir, options.dryRun, manager.env) !== 0) { failures += 1; console.error(`  install failed for ${item.name}`); continue }
     manifest.dependencies[item.name] = linkSpec
     if (!bundles.includes(item.name)) bundles.push(item.name)
+    changed = true
     console.log(options.dryRun ? `would install ${item.name}` : `installed ${item.name}`)
   }
 
   manifest.dsh.profile.bundles = bundles
-  writeManifest(manifestPath, manifest, options.dryRun)
+  // Do not rewrite the manifest when every package failed: a partially applied
+  // install is harder to reason about than no change at all.
+  if (changed) writeManifest(manifestPath, manifest, options.dryRun)
+  else console.log('profile manifest unchanged (no package was installed or removed)')
 
   console.log('')
   // kita-session-title-auto disables the official first-prompt title provider and
